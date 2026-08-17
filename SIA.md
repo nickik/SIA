@@ -1,41 +1,53 @@
 # Scalable Instruction Architecture (SIA)
 
-## Integer Base Architecture — Draft v0.1
+## Integer Architecture — Draft v0.2
 
-SIA is a compact, scalable 32-bit RISC instruction set architecture designed around a 16-bit base instruction word.
+SIA is a compact, scalable 32-bit RISC instruction set architecture built around **mixed mandatory 16-bit and 32-bit instructions**.
 
-The first architecture defined here is the integer-only `SIA32-I` base. It has 16 architectural integer registers, no condition flags, and no floating-point or vector state.
+The first architecture defined here is the integer-only `SIA32-I` base. It has 16 architectural integer registers, no condition-code register, no branch delay slots, and no floating-point or vector state.
 
-The central design goal is to obtain SuperH-like instruction density without inheriting a flag-oriented execution model. SIA therefore keeps the register-mask conditional model from the Lighting/MIA work, spends encoding space on high-value address-generation operations, and reserves a clean path to future 32-bit instructions.
+SIA has two equally architectural instruction lengths:
 
-This document is a working specification. Instruction semantics are intended to be stable enough for an assembler, emulator, and compiler prototype. Numeric opcode assignments are still provisional until code-density experiments are performed.
+- **short** — 16-bit instructions for common operations and maximum code density;
+- **wide** — 32-bit instructions for richer operand forms, larger immediates, generalized address generation, and operations that cannot be encoded cleanly in 16 bits.
+
+Both lengths are mandatory. There is no compressed mode, wide mode, compatibility mode, or ISA-mode switch. A conforming `SIA32-I` processor executes arbitrary interleaved 16-bit and 32-bit instructions.
+
+The design objective is an extended 16-bit RISC: the common path should have SuperH-like density, while the architecture should not distort itself merely to force every useful operation into 16 bits.
+
+Numeric opcode assignments in this draft remain provisional until assembler, compiler, and code-density experiments are available. Instruction semantics and the short/wide division are intended to be much more stable.
 
 ---
 
-## 1. Design goals
+# 1. Design goals
 
 `SIA32-I` targets the following properties:
 
 - 32-bit integer and address model.
 - Exactly 16 architectural integer registers.
-- Every instruction in the initial ISA is exactly 16 bits.
-- One bit of every first instruction halfword is reserved to distinguish future 32-bit instructions.
-- No condition-code or flags register.
+- Four-bit register identifiers everywhere.
+- Native 16-bit instructions for common operations.
+- Native 32-bit instructions as a mandatory part of the same base ISA.
+- The first halfword identifies instruction length without mode state.
+- No condition-code or arithmetic flags register.
 - Compare instructions produce integer masks.
-- Conditional move operates directly from a register condition.
-- Common pointer and stack walks have auto-increment/decrement memory forms.
-- Register-indexed and scaled-array word loads are directly encoded.
-- Common integer operations remain simple to decode and pipeline.
+- Conditional move and full conditional select are architectural operations.
+- Common pointer and stack walks have update addressing.
+- Register-indexed and scaled-array memory operations are architectural.
+- Bitfield extract and insert are architectural.
+- High-value bit manipulation is architectural rather than left to large optional extensions.
 - No branch delay slots.
-- The ISA can later grow through defined extensions without changing old encodings.
+- PC-relative address and literal formation are first-class operations.
+- Precise exceptions and a simple compiler-visible execution model take priority over clever hidden state.
+- Future architecture growth must preserve all old encodings.
 
-The architecture is deliberately not a compressed encoding of a separate 32-bit ISA. The 16-bit form is the native base ISA.
+SIA is deliberately not a 32-bit ISA with a compressed side ISA. The 16-bit and 32-bit forms are parts of one instruction set.
 
 ---
 
-## 2. Architectural state
+# 2. Architectural state
 
-### 2.1 Integer width
+## 2.1 Integer width
 
 `XLEN = 32` in `SIA32-I`.
 
@@ -43,159 +55,158 @@ Integer arithmetic is performed modulo 2^32 unless an instruction explicitly spe
 
 Addresses are 32 bits and memory is byte addressed.
 
-### 2.2 Integer registers
+## 2.2 Integer registers
 
-SIA defines 16 integer registers, encoded using four bits.
+SIA defines 16 integer registers:
 
 | Register | Architectural / ABI role |
 |---|---|
-| `r0` | Constant zero |
-| `r1-r12` | General-purpose integer registers |
-| `r13` | Stack pointer, `sp`, by ABI |
-| `r14` | Link register, `lr` |
-| `r15` | Frame pointer, `fp`, by ABI; otherwise general-purpose |
+| `r0` | constant zero |
+| `r1-r12` | general-purpose integer registers |
+| `r13` | stack pointer, `sp`, by ABI |
+| `r14` | link register, `lr`, by ABI |
+| `r15` | frame pointer, `fp`, by ABI; otherwise general-purpose |
 
-Writes to `r0` are discarded and reads from `r0` return zero, except where an encoding explicitly reuses an otherwise useless `rd = r0` pattern as an instruction escape.
+Reads from `r0` return zero. Writes to `r0` are discarded except where an encoding explicitly reuses an otherwise useless destination-zero pattern as an escape.
 
 Suggested initial ABI:
 
 - `r1-r6`: arguments and return values
 - `r7-r8`: caller-saved temporaries
-- `r9-r12`: callee-saved registers
+- `r9-r12`: callee-saved
 - `r13`: stack pointer
 - `r14`: link register
-- `r15`: frame pointer when used
+- `r15`: frame pointer when required
 
-The ABI is not part of the core instruction semantics and may be specified separately.
+The ABI is separate from core instruction semantics.
 
-### 2.3 Program counter
+## 2.3 Program counter
 
-The program counter addresses bytes.
+The PC addresses bytes.
 
-A normal SIA32-I instruction advances the PC by 2 bytes.
+A short instruction advances the PC by 2 bytes.
+
+A wide instruction advances the PC by 4 bytes.
+
+Every valid instruction address is at least 2-byte aligned.
 
 There are no architecturally visible branch delay slots.
 
 ---
 
-## 3. Instruction length and future expansion
+# 3. Instruction length encoding
 
-Every SIA32-I v0.1 instruction is one 16-bit halfword.
+Instructions are fetched as 16-bit halfwords.
 
-The most significant bit of the first halfword is the instruction-length discriminator:
+For the first halfword `H0`:
 
 ```text
-bit 15 = 0   current 16-bit SIA instruction
-bit 15 = 1   reserved prefix for a future 32-bit SIA instruction
+H0[15] = 0    16-bit short instruction
+H0[15] = 1    32-bit wide instruction; consume H0 and following H1
 ```
 
-A v0.1 implementation shall treat an instruction whose first halfword has bit 15 set as an illegal instruction.
+A 32-bit instruction may begin at any 2-byte-aligned address. It is not required to be 4-byte aligned.
 
-A future 32-bit encoding will consume the first halfword with bit 15 set plus the following 16-bit halfword. Future 32-bit instructions will remain aligned only to 16-bit boundaries unless a later specification states otherwise.
+In memory, `H0` is always the lower-addressed halfword. `H1` immediately follows it.
 
-This reservation guarantees that future wider instructions can be added without reinterpreting any valid v0.1 instruction.
+This makes instruction length locally decodable from the first halfword and allows short and wide instructions to be freely interleaved.
+
+There is no instruction-set mode bit in the PC or status register.
 
 ---
 
-## 4. Why SIA is not a fully three-address ISA
+# 4. Why SIA uses both 16 and 32 bits
 
-After the length bit is reserved, a 16-bit SIA instruction has 15 remaining encoding bits.
+After reserving the length bit, a short instruction has 15 remaining bits.
 
-Three unrestricted register operands require:
+Three unrestricted registers require:
 
 ```text
 4 + 4 + 4 = 12 bits
 ```
 
-That leaves only three bits for distinguishing the operation.
+That leaves only three bits for identifying the operation.
 
-Therefore the entire 16-bit namespace could encode at most eight unrestricted three-register operations if every encoding were consumed by that format.
+Four unrestricted registers require all 16 bits before an opcode is encoded at all.
 
-SIA deliberately does not spend its encoding budget that way.
+Therefore SIA uses 16-bit encodings only where they provide exceptional density value. Richer forms use the mandatory wide encoding rather than contorting the architecture around tiny fields, implicit registers, or hidden condition state.
 
-Instead:
+The intended compiler policy is:
 
-- a few especially valuable operations use full three-register encodings;
-- most ALU operations use two-address destructive forms;
-- immediates use dedicated compact formats;
-- control flow uses register-plus-relative-displacement formats;
-- future 32-bit instructions are reserved for operations whose operand structure genuinely needs more bits.
-
-This is the principal architectural difference from the earlier Lighting ISA v2 three-register model.
+1. Prefer a short instruction whenever it expresses the desired operation directly.
+2. Use a wide instruction when it avoids extra moves, extra address-generation operations, or destructive two-address constraints.
+3. Optimize for both **bytes** and **instruction path length**, not code size alone.
 
 ---
 
-## 5. Execution and conditional model
+# 5. Conditional model
 
-SIA has no arithmetic condition flags.
+SIA has no arithmetic flags register.
 
-Comparisons write a normal integer register.
+Scalar comparisons write a normal integer register.
 
-A true comparison result is:
+True is represented as:
 
 ```text
 0xFFFFFFFF
 ```
 
-A false comparison result is:
+False is represented as:
 
 ```text
 0x00000000
 ```
 
-This makes compare results directly useful as masks and as conditions for conditional move or branch instructions.
+This gives comparison results useful semantics as both Boolean conditions and full-register masks.
 
 Example:
 
 ```asm
-MOV     r7, r1
-CMPLT   r7, r2          ; r7 = (r1 < r2) ? 0xFFFFFFFF : 0
-MOV     r3, r2          ; false value
-CMOV    r3, r1, r7      ; if r7 != 0, r3 = r1
+CMPLT   r7, r1, r2
+SEL     r3, r1, r2, r7
 ```
 
 Conceptually:
 
 ```c
-r3 = ((int32_t)r1 < (int32_t)r2) ? r1 : r2;
+r7 = ((int32_t)r1 < (int32_t)r2) ? 0xFFFFFFFFu : 0;
+r3 = (r7 != 0) ? r1 : r2;
 ```
 
-`CMOV` does not need a condition-code register.
+The short ISA also contains destructive `CMOV` for cases where a full four-register select is unnecessary.
 
 ---
 
-## 6. Byte order and alignment
+# 6. Byte order and alignment
 
-The initial SIA machine is little-endian for both instructions and data.
+The initial SIA machine is little-endian for instructions and data.
 
-Required natural alignment:
+Natural data alignment is required:
 
 - byte access: any byte address
 - halfword access: address divisible by 2
 - word access: address divisible by 4
 
-A misaligned halfword or word memory access traps in the base architecture.
+A misaligned halfword or word access traps.
 
-A later extension may define hardware-supported unaligned access without changing the base semantics.
+The base architecture does not include MIPS-style partial-word unaligned load/store instructions.
 
 ---
 
-# 7. Draft binary encoding
-
-Opcode allocation in this section is provisional, but the formats demonstrate that the required base architecture fits in the 16-bit namespace while preserving bit 15 for future 32-bit instructions.
+# 7. Short 16-bit instruction space
 
 ## 7.1 Primary map
 
 ```text
-15 14 13 12 11                         0
-+--+--------+----------------------------+
-|0 | primary|          payload           |
-+--+--------+----------------------------+
+15   14:12                         0
++--+--------+-----------------------+
+|0 | primary|        payload        |
++--+--------+-----------------------+
 ```
 
-The initial primary assignments are:
+Initial assignments:
 
-| Bits `14:12` | Format / instruction |
+| `H0[14:12]` | Format / instruction |
 |---|---|
 | `000` | `ADD rd, ra, rb` |
 | `001` | `CMOV rd, rs, rc` |
@@ -206,17 +217,15 @@ The initial primary assignments are:
 | `110` | scalar memory group |
 | `111` | control-flow / system group |
 
-The first four entries are intentionally expensive full three-register formats. Each consumes 4096 possible 16-bit encodings. They are reserved for operations where the third register removes particularly common instruction sequences.
+The first four groups are intentionally expensive unrestricted three-register formats.
 
----
-
-## 7.2 Full three-register format
+## 7.2 Short three-register operations
 
 ```text
-15   14:12   11:8   7:4   3:0
-+--+--------+------+------+------+
-|0 | opcode |  rd  |  ra  |  rb  |
-+--+--------+------+------+------+
+15  14:12  11:8  7:4  3:0
++--+------+-----+----+----+
+|0 | op   | rd  | ra | rb |
++--+------+-----+----+----+
 ```
 
 ### `ADD rd, ra, rb`
@@ -225,18 +234,10 @@ The first four entries are intentionally expensive full three-register formats. 
 rd = ra + rb;
 ```
 
-`ADD` is the principal non-destructive arithmetic/address-generation instruction.
-
-It also provides common pseudos such as:
+`MOV rd, rs` is encoded as:
 
 ```asm
-MOV rd, rs       ; ADD rd, r0, rs
-```
-
-and acts as the basic unscaled `LEA` operation:
-
-```asm
-ADD rd, base, index
+ADD rd, r0, rs
 ```
 
 ### `CMOV rd, rs, rc`
@@ -246,22 +247,7 @@ if (rc != 0)
     rd = rs;
 ```
 
-If `rc` is zero, `rd` retains its old value.
-
-This destructive-destination conditional move is chosen because a full four-register select:
-
-```text
-SEL rd, true_value, false_value, condition
-```
-
-cannot be encoded in 16 bits with 16 registers and the reserved length bit.
-
-A full select is therefore:
-
-```asm
-MOV     rd, false_value
-CMOV    rd, true_value, condition
-```
+If `rc == 0`, `rd` is unchanged.
 
 ### `LDX.W rd, [rb + ri]`
 
@@ -271,82 +257,28 @@ rd = load_u32(rb + ri);
 
 The index is an unscaled byte offset.
 
-This form is intended for already-scaled offsets, structure tables, interpreter tables, and addresses produced by previous arithmetic.
-
 ### `LDA.W rd, [rb + (ri << 2)]`
 
 ```c
 rd = load_u32(rb + (ri << 2));
 ```
 
-This is the direct 32-bit array-load instruction.
+This is the short fast path for a 32-bit array load.
 
-It performs the common operation:
+## 7.3 Destination-zero short escapes
 
-```c
-rd = ((uint32_t *)rb)[ri];
-```
+The otherwise useless result-to-`r0` patterns of the four three-register groups are reclaimed.
 
-without a separate shift or address-generation instruction.
-
-The base ISA does not provide an indexed store. An indexed store is synthesized using `ADD` plus `SW`. A future 32-bit encoding may add fully general indexed/scaled loads and stores.
-
----
-
-## 7.3 Destination-zero escape encodings
-
-For the four full three-register primary operations, `rd = r0` would normally discard the result and is therefore not useful.
-
-SIA reserves those patterns as compact escape encodings.
-
-The initial assignments are:
-
-| Primary operation with `rd = r0` | Reinterpreted instruction |
+| Parent slot with `rd=r0` | Escape instruction |
 |---|---|
-| `ADD` slot | `CLZ rd, rs` |
-| `CMOV` slot | `CTZ rd, rs` |
-| `LDX.W` slot | `CPOP rd, rs` |
-| `LDA.W` slot | `NOT rd, rs` |
-
-In these escape encodings, the two remaining 4-bit register fields are reinterpreted as destination and source.
-
-This recovers useful encoding space without removing any meaningful operation, because writing the normal result to `r0` would be discarded.
-
-### `CLZ rd, rs`
-
-Count leading zero bits.
-
-```c
-rd = clz32(rs);
-```
-
-### `CTZ rd, rs`
-
-Count trailing zero bits.
-
-```c
-rd = ctz32(rs);
-```
-
-### `CPOP rd, rs`
-
-Population count.
-
-```c
-rd = popcount32(rs);
-```
-
-### `NOT rd, rs`
-
-```c
-rd = ~rs;
-```
+| `ADD` | `CLZ rd, rs` |
+| `CMOV` | `CTZ rd, rs` |
+| `LDX.W` | `CPOP rd, rs` |
+| `LDA.W` | `NOT rd, rs` |
 
 ---
 
-# 8. Integer ALU group
-
-Encoding:
+# 8. Short integer ALU group
 
 ```text
 15 14:12 11:8 7:4 3:0
@@ -355,7 +287,7 @@ Encoding:
 +--+-----+----+---+----+
 ```
 
-Unless otherwise stated, the two-address operation reads the old value of `rd` as its first source and then replaces `rd`.
+These are destructive two-address forms: the old value of `rd` is the first source.
 
 | `fn` | Instruction | Semantics |
 |---|---|---|
@@ -376,57 +308,15 @@ Unless otherwise stated, the two-address operation reads the old value of `rd` a
 | `E` | `MAX rd, rs` | signed maximum |
 | `F` | `MAXU rd, rs` | unsigned maximum |
 
-## 8.1 Checked arithmetic
-
-`ADDC` and `SUBC` use `C` to mean **checked**, not carry.
-
-`ADDC rd, rs` performs signed 32-bit addition and traps on signed overflow.
-
-`SUBC rd, rs` performs signed 32-bit subtraction and traps on signed overflow.
-
-Ordinary `ADD`, `ADDI`, and `SUB` wrap modulo 2^32.
+`C` in `ADDC` and `SUBC` means **checked**, not carry. These instructions trap on signed overflow.
 
 There is no architectural carry flag.
 
-Multi-precision arithmetic, if later standardized, will use explicit register results rather than a hidden flags register.
-
-## 8.2 Shifts
-
-For register shifts, the effective shift count is:
-
-```c
-rs & 31
-```
-
-SIA retains conventional shift instructions in the 16-bit base.
-
-The earlier Lighting design attempted to use general bitfield operations as the base shift substrate. With only 16 instruction bits, two unrestricted 5-bit bitfield immediates plus register fields do not fit cleanly. Full `BFEXT`/`BFINS` operations are therefore candidates for the future 32-bit encoding space rather than the 16-bit base.
-
-## 8.3 Derived comparisons
-
-Only three primitive comparisons are required in the base encoding:
-
-- equal
-- signed less-than
-- unsigned less-than
-
-Other comparisons are assembler pseudos or compiler sequences.
-
-For example:
-
-```text
-CMPNE   = CMPEQ followed by NOT
-CMPGE   = CMPLT followed by NOT
-CMPGEU  = CMPLTU followed by NOT
-```
-
-`CMPLE` and `CMPLEU` are formed by reversing operands for the corresponding greater-than test and inverting the result.
+Register shift counts use the low five bits of the shift-count register.
 
 ---
 
-# 9. Immediate group
-
-Encoding:
+# 9. Short immediate group
 
 ```text
 15 14:12 11 10:7 6:0
@@ -435,34 +325,21 @@ Encoding:
 +--+-----+--+----+-------+
 ```
 
-`imm7` is a signed two's-complement immediate in the range `-64..+63`.
+`imm7` is signed in the range `-64..+63`.
 
 | `op` | Instruction |
 |---|---|
 | `0` | `LI rd, imm7` |
 | `1` | `ADDI rd, imm7` |
 
-### `LI rd, imm7`
-
 ```c
-rd = sign_extend_7(imm7);
+LI:   rd = sign_extend_7(imm7);
+ADDI: rd = rd + sign_extend_7(imm7);
 ```
-
-### `ADDI rd, imm7`
-
-```c
-rd = rd + sign_extend_7(imm7);
-```
-
-This form covers common stack adjustment, loop stepping, small constants, and pointer movement.
-
-Larger constants are built using literal loads or multi-instruction sequences. A future 32-bit instruction format is expected to provide larger immediate fields.
 
 ---
 
-# 10. Scalar memory group
-
-Encoding:
+# 10. Short scalar memory group
 
 ```text
 15 14:12 11:8 7:4 3:0
@@ -471,66 +348,50 @@ Encoding:
 +--+-----+----+----+------+
 ```
 
-`rv` is the value register and `rb` is the base-address register.
+| `mode` | Instruction |
+|---|---|
+| `0` | `LB rv, [rb]` |
+| `1` | `LBU rv, [rb]` |
+| `2` | `LH rv, [rb]` |
+| `3` | `LHU rv, [rb]` |
+| `4` | `LW rv, [rb]` |
+| `5` | `SB rv, [rb]` |
+| `6` | `SH rv, [rb]` |
+| `7` | `SW rv, [rb]` |
+| `8` | `LW rv, [rb + 4]` |
+| `9` | `SW rv, [rb + 4]` |
+| `A` | `LW rv, [rb + 8]` |
+| `B` | `SW rv, [rb + 8]` |
+| `C` | `LW rv, [rb]+` |
+| `D` | `SW rv, [rb]+` |
+| `E` | `LW rv, -[rb]` |
+| `F` | `SW rv, -[rb]` |
 
-The initial mode map is:
+The update forms are defined as:
 
-| `mode` | Instruction | Effective address / update |
-|---|---|---|
-| `0` | `LB rv, [rb]` | byte, sign extend |
-| `1` | `LBU rv, [rb]` | byte, zero extend |
-| `2` | `LH rv, [rb]` | halfword, sign extend |
-| `3` | `LHU rv, [rb]` | halfword, zero extend |
-| `4` | `LW rv, [rb]` | word |
-| `5` | `SB rv, [rb]` | byte store |
-| `6` | `SH rv, [rb]` | halfword store |
-| `7` | `SW rv, [rb]` | word store |
-| `8` | `LW rv, [rb + 4]` | word displacement |
-| `9` | `SW rv, [rb + 4]` | word displacement |
-| `A` | `LW rv, [rb + 8]` | word displacement |
-| `B` | `SW rv, [rb + 8]` | word displacement |
-| `C` | `LW rv, [rb]+` | load, then `rb += 4` |
-| `D` | `SW rv, [rb]+` | store, then `rb += 4` |
-| `E` | `LW rv, [rb]-` | load, then `rb -= 4` |
-| `F` | `SW rv, [rb]-` | store, then `rb -= 4` |
-
-The update forms are intentionally explicit architectural operations, not assembler macros.
-
-They are useful for:
-
-- pointer walks
-- loops over word arrays
-- streaming parsers
-- stack-like structures
-- copy/fill loops
-
-The base draft uses post-update word operations because they provide the highest value per encoding bit. Pre-update forms and byte/halfword update forms remain open candidates for later encoding revisions or the future 32-bit extension.
-
-## 10.1 Larger displacements
-
-The 16-bit base does not attempt to put a general displacement field on every load and store.
-
-For a larger field offset, software can use:
-
-```asm
-MOV     rt, rb
-ADDI    rt, offset
-LW      rd, [rt]
+```text
+LW rv,[rb]+     load from rb, then rb += 4
+SW rv,[rb]+     store to rb, then rb += 4
+LW rv,-[rb]     rb -= 4, then load from rb
+SW rv,-[rb]     rb -= 4, then store to rb
 ```
 
-or an equivalent sequence.
+This deliberately provides both forward pointer walking and natural stack behavior:
 
-This is an intentional tradeoff: indexed/scaled loads and update modes receive encoding space before large scalar displacements.
+```asm
+SW r4, -[sp]     ; push
+LW r4, [sp]+     ; pop
+```
+
+For an updating load, `rv == rb` is illegal because the load result and base update would target the same architectural register.
 
 ---
 
-# 11. Control flow
+# 11. Short control flow
 
-SIA control flow is PC relative where practical and has no delay slots.
+There are no delay slots.
 
-## 11.1 Branch on nonzero / true
-
-Encoding:
+## 11.1 Branch on nonzero
 
 ```text
 15 14:11 10:7 6:0
@@ -539,30 +400,18 @@ Encoding:
 +--+-----+----+-------+
 ```
 
-For `rs != r0`:
-
 ```asm
 BNZ rs, target
 ```
-
-Semantics:
 
 ```c
 if (rs != 0)
     pc = next_pc + sign_extend_7(disp7) * 2;
 ```
 
-Because compare instructions produce zero or all-ones masks, `BNZ` is also the natural branch-on-true instruction.
-
-`BT` is an assembler alias for `BNZ`.
-
-The branch range is approximately ±128 bytes from the following instruction.
-
-A separate branch-on-false encoding is not required in the initial base. Compilers may invert the comparison, invert its mask, or arrange the likely path as fall-through.
+`BT` may be accepted as an alias when the source is known to contain a comparison mask.
 
 ## 11.2 Direct branch and call
-
-Encoding:
 
 ```text
 15 14:11 10 9:0
@@ -571,131 +420,684 @@ Encoding:
 +--+-----+--+----------+
 ```
 
-### `B target`
+`L=0` is `B target`.
 
-`L = 0`
+`L=1` is `BL target`, which writes the address of the following instruction to `r14`.
 
-```c
-pc = next_pc + sign_extend_10(disp10) * 2;
-```
+## 11.3 Register-control escape
 
-### `BL target`
+The impossible `BNZ r0,...` case is reclaimed for control/system instructions.
 
-`L = 1`
-
-```c
-r14 = next_pc;
-pc  = next_pc + sign_extend_10(disp10) * 2;
-```
-
-`BL` therefore uses the architectural link register and does not spend four encoding bits selecting an arbitrary link destination.
-
-The direct branch/call range is approximately ±1 KiB.
-
-## 11.3 Register branch escape
-
-The encoding that would otherwise be `BNZ r0, ...` can never branch and is therefore reserved as a control escape.
-
-Its seven low bits are interpreted as:
+Initial assignments include:
 
 ```text
-6:4   subop
-3:0   register / small immediate
+JR rs
+JALR rs
+TRAP imm4
+BREAK
+NOP
 ```
 
-Initial suboperations:
-
-| `subop` | Instruction |
-|---|---|
-| `000` | `JR rs` |
-| `001` | `JALR rs` |
-| `010` | `TRAP imm4` |
-| `011` | `BREAK` when low field is zero |
-| `100` | `NOP` when low field is zero |
-| `101-111` | reserved |
-
-### `JR rs`
-
-```c
-pc = rs;
-```
-
-### `JALR rs`
-
-```c
-r14 = next_pc;
-pc = rs;
-```
-
-### `RET`
-
-Assembler alias:
-
-```asm
-RET     ; JR r14
-```
-
-### `TRAP imm4`
-
-Raises a synchronous software trap with a 4-bit architected trap number.
-
-### `BREAK`
-
-Raises the architected breakpoint/debug exception.
+`RET` is an alias for `JR r14`.
 
 ---
 
-# 12. Base instruction summary
+# 12. Mandatory 32-bit wide encoding
 
-## Arithmetic and logic
+Every `SIA32-I` implementation must implement the wide instruction format.
+
+A wide instruction consists of `H0` and `H1`:
+
+```text
+H0:
+15  14:8   7:4  3:0
++--+------+----+----+
+|1 | xop  | A  | B  |
++--+------+----+----+
+
+H1:
+15                     0
++-----------------------+
+|      operation data   |
++-----------------------+
+```
+
+`xop` is a seven-bit wide-operation code.
+
+`A` and `B` are usually register fields but may become immediate bits for formats that do not need two registers.
+
+The 16-bit `H1` payload is interpreted by the selected `xop`.
+
+This gives SIA 128 wide operation families while retaining four-bit register identifiers.
+
+Wide opcode allocation is grouped as follows:
+
+| `xop` range | Use |
+|---|---|
+| `00-0F` | three-register arithmetic and logic |
+| `10-1F` | compare, select, bitfield |
+| `20-2F` | immediate and constant formation |
+| `30-3F` | generalized memory and address generation |
+| `40-4F` | control flow |
+| `50-5F` | multiply/divide and integer helpers |
+| `60-6F` | bit manipulation and byte operations |
+| `70-7F` | reserved for future base-architecture growth |
+
+Exact `xop` values inside these ranges are provisional.
+
+---
+
+# 13. Wide three-register arithmetic and logic
+
+The wide three-register form removes the destructive destination constraint of the short ALU group.
+
+Conceptual format:
+
+```text
+H0:  1 | xop | rd | ra
+H1:  rb | reserved(12)
+```
+
+Required operations:
+
+```text
+SUB     rd, ra, rb
+ADDC    rd, ra, rb
+SUBC    rd, ra, rb
+
+AND     rd, ra, rb
+OR      rd, ra, rb
+XOR     rd, ra, rb
+ANDN    rd, ra, rb
+ORN     rd, ra, rb
+XNOR    rd, ra, rb
+
+SHL     rd, ra, rb
+SHR     rd, ra, rb
+SAR     rd, ra, rb
+ROL     rd, ra, rb
+ROR     rd, ra, rb
+
+MIN     rd, ra, rb
+MINU    rd, ra, rb
+MAX     rd, ra, rb
+MAXU    rd, ra, rb
+```
+
+`ADD rd,ra,rb` already has a short unrestricted three-register encoding and therefore does not require a distinct wide encoding.
+
+Boolean-not combinations are defined as:
+
+```c
+ANDN: rd = ra & ~rb;
+ORN:  rd = ra | ~rb;
+XNOR: rd = ~(ra ^ rb);
+```
+
+Rotates use the low five bits of `rb` as the count.
+
+---
+
+# 14. Features intentionally absent from the 16-bit form but mandatory in the 32-bit base
+
+These are **not optional extensions**. They are required parts of `SIA32-I`; only their compact 16-bit encodings are absent.
+
+## 14.1 Full immediate bitfields
+
+```text
+BFEXTU rd, rs, pos, len
+BFEXTS rd, rs, pos, len
+BFINS  rd, ra, rb, pos, len
+```
+
+`pos` is a five-bit bit position `0..31`.
+
+`len` is encoded as `len-1`, permitting lengths `1..32`.
+
+### `BFEXTU`
+
+```c
+rd = (rs >> pos) & mask(len);
+```
+
+### `BFEXTS`
+
+```c
+rd = sign_extend((rs >> pos) & mask(len), len);
+```
+
+### `BFINS`
+
+```c
+rd = (ra & ~(mask(len) << pos)) |
+     ((rb & mask(len)) << pos);
+```
+
+An encoding whose requested field extends past bit 31 is illegal rather than wrapping.
+
+These instructions provide shifts, masks, field extraction, register packing, device-register manipulation, and language-runtime tag manipulation without creating a large addressing-mode-like family of special cases.
+
+## 14.2 Full four-register `SEL`
+
+```text
+SEL rd, rt, rf, rc
+```
+
+Semantics:
+
+```c
+rd = (rc != 0) ? rt : rf;
+```
+
+Conceptual encoding:
+
+```text
+H0: 1 | xop | rd | rt
+H1: rf(4) | rc(4) | reserved(8)
+```
+
+The 16-bit `CMOV` remains useful because it can often perform the same job in half the bytes when one alternative is already in the destination.
+
+## 14.3 Fully general scaled memory operations
+
+Wide indexed memory instructions support:
+
+- byte, halfword, and word accesses;
+- signed and unsigned byte/halfword loads;
+- loads and stores;
+- index scales x1, x2, x4, x8;
+- a signed 7-bit byte displacement;
+- no update, pre-update, or post-update of the base register.
+
+Syntax:
+
+```text
+LBX   rd, [rb + ri*scale + disp], update
+LBUX  rd, [rb + ri*scale + disp], update
+LHX   rd, [rb + ri*scale + disp], update
+LHUX  rd, [rb + ri*scale + disp], update
+LWX   rd, [rb + ri*scale + disp], update
+
+SBX   rs, [rb + ri*scale + disp], update
+SHX   rs, [rb + ri*scale + disp], update
+SWX   rs, [rb + ri*scale + disp], update
+```
+
+Conceptual `H1` layout:
+
+```text
+15:12  11:10  9:7     6:0
++------+-----+-------+-------+
+|  ri  |scale| update| disp7 |
++------+-----+-------+-------+
+```
+
+Scale encoding:
+
+```text
+00 = x1
+01 = x2
+10 = x4
+11 = x8
+```
+
+Update encoding:
+
+```text
+000 = none
+001 = post-increment base by access size
+010 = post-decrement base by access size
+011 = pre-increment base by access size
+100 = pre-decrement base by access size
+101-111 = reserved
+```
+
+`ri = r0` means no index.
+
+The displacement is always a byte displacement; the scale applies only to the register index.
+
+The effective address without pre-update is:
+
+```c
+EA = rb + (ri << scale) + sign_extend_7(disp7);
+```
+
+For a pre-update form, `rb` is first changed by the access size and the updated value participates in the effective-address calculation.
+
+For a post-update form, the memory access uses the old base and the base is updated only after a successful access.
+
+An updating load with `rd == rb` is illegal.
+
+## 14.4 Additional Boolean operations
+
+The following are mandatory wide operations:
+
+```text
+ANDN rd, ra, rb
+ORN  rd, ra, rb
+XNOR rd, ra, rb
+```
+
+They are useful in mask-heavy systems code and avoid an otherwise unnecessary `NOT` temporary.
+
+## 14.5 Single-bit operations
+
+The wide base includes register-indexed and immediate forms:
+
+```text
+BSET   rd, rs, rb
+BCLR   rd, rs, rb
+BINV   rd, rs, rb
+BEXT   rd, rs, rb
+
+BSETI  rd, rs, bit
+BCLRI  rd, rs, bit
+BINVI  rd, rs, bit
+BEXTI  rd, rs, bit
+```
+
+Semantics:
+
+```c
+BSET: rd = rs |  (1u << bit);
+BCLR: rd = rs & ~(1u << bit);
+BINV: rd = rs ^  (1u << bit);
+BEXT: rd = (rs >> bit) & 1u;
+```
+
+Register-indexed forms use the low five bits of the bit-index register.
+
+---
+
+# 15. Wide compare operations
+
+Wide compares are non-destructive three-register operations:
+
+```text
+CMPEQ   rd, ra, rb
+CMPNE   rd, ra, rb
+CMPLT   rd, ra, rb
+CMPLTU  rd, ra, rb
+CMPLE   rd, ra, rb
+CMPLEU  rd, ra, rb
+```
+
+Every result is either zero or `0xFFFFFFFF`.
+
+Immediate forms are also required:
+
+```text
+CMPEQI  rd, ra, imm16
+CMPLTI  rd, ra, imm16
+CMPLTUI rd, ra, uimm16
+```
+
+The immediate signedness follows the comparison.
+
+---
+
+# 16. Wide immediate arithmetic and constants
+
+Wide immediate ALU operations use a 16-bit immediate:
+
+```text
+ADDI rd, ra, imm16
+ANDI rd, ra, imm16
+ORI  rd, ra, imm16
+XORI rd, ra, imm16
+```
+
+The arithmetic immediate is sign extended. Logical immediates are zero extended.
+
+Required constant-building instructions:
+
+```text
+MOVI rd, simm20
+LUI  rd, uimm20
+```
+
+`MOVI` sign extends a 20-bit constant.
+
+`LUI` writes:
+
+```c
+rd = uimm20 << 12;
+```
+
+A general 32-bit constant can therefore be formed using `LUI` plus a low-part operation, while common small constants use short `LI`, wide `MOVI`, or a PC-relative literal load.
+
+---
+
+# 17. Address-generation instructions
+
+## 17.1 `LEA`
+
+The wide base includes a general integer address generator:
+
+```text
+LEA rd, [rb + ri*scale + disp10]
+```
+
+Semantics:
+
+```c
+rd = rb + (ri << scale) + sign_extend_10(disp10);
+```
+
+`ri = r0` removes the index.
+
+Scale is x1/x2/x4/x8.
+
+This is arithmetic only; it does not access memory.
+
+The following are assembler aliases:
+
+```text
+SH1ADD rd, ra, rb    == LEA rd, [rb + ra*2]
+SH2ADD rd, ra, rb    == LEA rd, [rb + ra*4]
+SH3ADD rd, ra, rb    == LEA rd, [rb + ra*8]
+```
+
+This directly captures the useful shift-and-add idea without requiring three separate architectural datapaths.
+
+## 17.2 `ADR`
+
+```text
+ADR rd, target
+```
+
+`ADR` forms a PC-relative address using a signed 20-bit halfword displacement:
+
+```c
+rd = next_pc + sign_extend_20(disp20) * 2;
+```
+
+This is the normal position-independent way to obtain nearby code or data addresses.
+
+## 17.3 PC-relative literal load
+
+```text
+LDLIT.W rd, target
+```
+
+The effective address is relative to the next instruction, rounded down to a 4-byte boundary:
+
+```c
+base = next_pc & ~3u;
+EA   = base + sign_extend_20(disp20) * 4;
+rd   = load_u32(EA);
+```
+
+This gives assemblers an efficient single-instruction path for arbitrary 32-bit constants and addresses stored in nearby literal pools.
+
+---
+
+# 18. Wide control flow
+
+## 18.1 Direct compare-and-branch
+
+The wide base includes direct two-register branches:
+
+```text
+BEQ   ra, rb, target
+BNE   ra, rb, target
+BLT   ra, rb, target
+BGE   ra, rb, target
+BLTU  ra, rb, target
+BGEU  ra, rb, target
+```
+
+These use a signed 16-bit halfword displacement relative to `next_pc`.
+
+They exist because producing a mask and then branching is excellent when the mask is also consumed by dataflow, but wasteful when the comparison exists only for control flow.
+
+## 18.2 Decrement and branch
+
+```text
+DBNZ rs, target
+```
+
+Semantics:
+
+```c
+rs = rs - 1;
+if (rs != 0)
+    pc = target;
+```
+
+The subtraction wraps modulo 2^32.
+
+This is intended for compact counted loops and removes a dependency-visible `ADDI -1` plus `BNZ` pair.
+
+## 18.3 Long direct branch and call
+
+Wide direct branches use a signed 24-bit halfword displacement:
+
+```text
+B.W  target
+BL.W target
+```
+
+`BL.W` writes `next_pc` to `r14`.
+
+## 18.4 Register jump with displacement
+
+```text
+JALR rd, rb, imm16
+```
+
+Semantics:
+
+```c
+target = (rb + sign_extend_16(imm16)) & ~1u;
+rd = next_pc;
+pc = target;
+```
+
+Clearing bit zero is intentional. Since SIA instructions are at least halfword aligned, the low pointer bit can be used by software as metadata without requiring an explicit clear before an indirect call.
+
+Aliases:
+
+```text
+JR    rb          == JALR r0, rb, 0
+CALLR rb          == JALR r14, rb, 0
+RET               == JALR r0, r14, 0
+```
+
+---
+
+# 19. Multiply and divide
+
+Ordinary integer multiplication and division are mandatory wide operations rather than optional extension families.
+
+```text
+MUL     rd, ra, rb
+MULH    rd, ra, rb
+MULHU   rd, ra, rb
+MULHSU  rd, ra, rb
+MULC    rd, ra, rb
+
+DIV     rd, ra, rb
+DIVU    rd, ra, rb
+REM     rd, ra, rb
+REMU    rd, ra, rb
+```
+
+`MUL` returns the low 32 bits of the product.
+
+`MULH`, `MULHU`, and `MULHSU` return the high 32 bits of signed×signed, unsigned×unsigned, and signed×unsigned 64-bit products respectively.
+
+`MULC` performs signed multiplication and traps if the mathematical result is not representable in signed 32 bits.
+
+`DIV` and `DIVU` produce quotient only; `REM` and `REMU` produce remainder. There are no special HI/LO result registers.
+
+Division by zero traps.
+
+Signed division of `0x80000000 / -1` traps as signed overflow.
+
+---
+
+# 20. Additional required integer helpers
+
+The following wide operations are part of the integer architecture:
+
+```text
+SEXT.B  rd, rs
+SEXT.H  rd, rs
+ZEXT.B  rd, rs
+ZEXT.H  rd, rs
+REV8    rd, rs
+```
+
+`REV8` reverses byte order within the 32-bit register:
+
+```text
+0x11223344 -> 0x44332211
+```
+
+`CLZ`, `CTZ`, `CPOP`, and `NOT` already have compact 16-bit encodings and therefore need no mandatory duplicate wide encoding.
+
+---
+
+# 21. SuperH ideas deliberately carried into SIA
+
+SIA takes several density lessons from SuperH while avoiding its architectural condition bit and delay-slot model.
+
+## 21.1 Native 16-bit common path
+
+The first priority is that ordinary integer, memory, and branch sequences remain dense without entering a separate compressed ISA mode.
+
+## 21.2 PC-relative literal pools
+
+Large constants do not need to force large immediate fields into every instruction. `LDLIT.W` provides a defined PC-relative constant-pool path.
+
+## 21.3 Generalized `MOVA` idea
+
+SIA `ADR` is the general form of the PC-relative address-generation idea: it can target any integer register rather than a single implicit register.
+
+## 21.4 Post-increment and pre-decrement
+
+The short forms:
+
+```text
+LW rd,[rb]+
+SW rs,-[rb]
+```
+
+make pointer walks, pushes, and pops compact.
+
+Wide indexed memory generalizes update addressing where needed.
+
+## 21.5 Decrement-and-test loop support
+
+SuperH-style decrement/test density is represented by `DBNZ`, but SIA writes no hidden T bit.
+
+## 21.6 What SIA does not copy
+
+SIA does not adopt:
+
+- a global T condition bit;
+- branch delay slots;
+- delayed-branch annul semantics;
+- an architecturally special global-base register;
+- multiply-accumulate or DSP-style instruction families in the integer base.
+
+An ABI may dedicate a general register as a global pointer without making it special in the ISA.
+
+---
+
+# 22. Useful ideas incorporated from other RISC architectures
+
+## 22.1 Alpha
+
+Useful Alpha-like ideas for SIA are:
+
+- condition-dependent data movement without a conventional flags register;
+- a hard zero register;
+- high-half multiply as a normal general-register result;
+- explicit memory-ordering operations in the future memory-model specification;
+- selected byte-manipulation operations as possible future additions if compiler data justifies them.
+
+Alpha-style `ZAP`/`ZAPNOT`, which clear selected bytes under a byte mask, are interesting but are **not** in `SIA32-I` v0.2. They should be measured against general bitfields and `AND` masks first.
+
+SIA also deliberately avoids Alpha's architecture-specific PAL mechanism in the integer ISA. Privileged software interfaces belong in a later privileged-architecture document.
+
+## 22.2 RISC-V
+
+SIA adopts or converges on several useful ideas also found in modern RISC-V integer work:
+
+- `SH1ADD`/`SH2ADD`/`SH3ADD` semantics, represented through `LEA`;
+- `ANDN`, `ORN`, and `XNOR`;
+- `CLZ`, `CTZ`, population count, min/max, rotates, and byte reverse;
+- single-bit set/clear/invert/extract operations;
+- conditional dataflow without requiring a flags register;
+- clearing bit zero on indirect jump targets.
+
+SIA does **not** need a separate conditional-zero instruction family because short `CMOV` plus wide four-register `SEL` already provide direct conditional data movement.
+
+## 22.3 MIPS
+
+Useful MIPS lessons incorporated into SIA include:
+
+- bitfield extract/insert;
+- sign/zero-extension helpers;
+- conditional move as a normal integer operation;
+- upper-immediate constant construction;
+- count-leading-zero and rotate helpers.
+
+SIA deliberately does not adopt:
+
+- HI/LO multiply/divide registers;
+- branch delay slots;
+- ISA-mode bits for switching between normal and compressed encodings;
+- partial-word unaligned load/store pairs.
+
+## 22.4 PA-RISC
+
+PA-RISC provides particularly strong precedent for two SIA choices:
+
+- shift-and-add integer addressing operations;
+- first-class extract/deposit bitfield operations.
+
+SIA also uses direct compare-and-branch instructions for cases where materializing a Boolean mask would only increase path length.
+
+PA-RISC-style instruction nullification or 'skip the following instruction if condition' is interesting for code density but is **not** currently part of SIA. With mixed 16/32-bit instructions it would require the machine to determine and suppress the complete next instruction, complicating fetch, prediction, debugging, and precise-exception reasoning for a relatively narrow gain.
+
+---
+
+# 23. Architectural instruction summary
+
+## 23.1 Short 16-bit core
 
 ```text
 ADD     rd, ra, rb
+CMOV    rd, rs, rc
+
 SUB     rd, rs
-ADDI    rd, imm7
 ADDC    rd, rs
 SUBC    rd, rs
 AND     rd, rs
 OR      rd, rs
 XOR     rd, rs
-NOT     rd, rs
 SHL     rd, rs
 SHR     rd, rs
 SAR     rd, rs
+CMPEQ   rd, rs
+CMPLT   rd, rs
+CMPLTU  rd, rs
 MIN     rd, rs
 MINU    rd, rs
 MAX     rd, rs
 MAXU    rd, rs
-```
 
-## Compare and conditional move
-
-```text
-CMPEQ   rd, rs
-CMPLT   rd, rs
-CMPLTU  rd, rs
-CMOV    rd, rs, rc
-```
-
-Compare results are always full 32-bit masks.
-
-## Bit helpers
-
-```text
 CLZ     rd, rs
 CTZ     rd, rs
 CPOP    rd, rs
-```
+NOT     rd, rs
 
-## Constants
-
-```text
 LI      rd, imm7
-```
+ADDI    rd, imm7
 
-## Memory
-
-```text
 LB      rd, [rb]
 LBU     rd, [rb]
 LH      rd, [rb]
@@ -704,290 +1106,142 @@ LW      rd, [rb]
 SB      rs, [rb]
 SH      rs, [rb]
 SW      rs, [rb]
-
-LW      rd, [rb + 4]
-LW      rd, [rb + 8]
-SW      rs, [rb + 4]
-SW      rs, [rb + 8]
-
-LW      rd, [rb]+
-SW      rs, [rb]+
-LW      rd, [rb]-
-SW      rs, [rb]-
+LW/SW   [rb + 4]
+LW/SW   [rb + 8]
+LW/SW   [rb]+
+LW/SW   -[rb]
 
 LDX.W   rd, [rb + ri]
-LDA.W   rd, [rb + (ri << 2)]
-```
+LDA.W   rd, [rb + ri*4]
 
-## Control flow
-
-```text
-BNZ     rs, target
-B       target
-BL      target
-JR      rs
-JALR    rs
+BNZ
+B
+BL
+JR
+JALR
 RET
-TRAP    imm4
+TRAP
 BREAK
 NOP
 ```
 
----
-
-# 13. Required assembler pseudos
-
-The assembler should provide common operations even when the base encoding intentionally avoids allocating a separate opcode.
-
-### Move
-
-```asm
-MOV rd, rs
-```
-
-expands to:
-
-```asm
-ADD rd, r0, rs
-```
-
-### Full conditional select
-
-```asm
-SEL rd, rt, rf, rc
-```
-
-expands to:
-
-```asm
-MOV  rd, rf
-CMOV rd, rt, rc
-```
-
-### Compare not equal
-
-```asm
-CMPNE rd, rs
-```
-
-expands to:
-
-```asm
-CMPEQ rd, rs
-NOT   rd, rd
-```
-
-### Compare greater or equal
-
-```asm
-CMPGE rd, rs
-```
-
-expands to:
-
-```asm
-CMPLT rd, rs
-NOT   rd, rd
-```
-
-Unsigned `CMPGEU` is analogous.
-
-### Larger load/store displacement
-
-The assembler may accept:
-
-```asm
-LW rd, [rb + imm]
-```
-
-for offsets not directly encodable and expand it using a temporary register when explicitly permitted by the assembler interface. Compiler back ends should normally perform the expansion themselves so register allocation remains visible.
-
----
-
-# 14. Features intentionally not in the 16-bit base
-
-The following Lighting/MIA ideas remain architecturally desirable but do not receive dedicated v0.1 16-bit encodings yet.
-
-## 14.1 Full immediate bitfield operations
-
-The earlier forms:
+## 23.2 Mandatory wide 32-bit core
 
 ```text
-BFEXTU rd, rs, pos, len
-BFEXTS rd, rs, pos, len
-BFINS  rd, ra, rb, pos, len
+three-register non-destructive ALU
+ANDN / ORN / XNOR
+ROL / ROR
+full three-register compares
+full four-register SEL
+
+BFEXTU / BFEXTS / BFINS
+BSET / BCLR / BINV / BEXT
+BSETI / BCLRI / BINVI / BEXTI
+
+ADDI16 / ANDI16 / ORI16 / XORI16
+MOVI20 / LUI20
+
+LEA with base + scaled index + displacement
+ADR
+LDLIT.W
+
+scaled/indexed byte/halfword/word loads and stores
+x1/x2/x4/x8 index scaling
+pre/post increment/decrement forms
+
+BEQ / BNE / BLT / BGE / BLTU / BGEU
+DBNZ
+B.W / BL.W
+JALR rd,rb,imm16
+
+MUL / MULH / MULHU / MULHSU / MULC
+DIV / DIVU / REM / REMU
+
+SEXT.B / SEXT.H / ZEXT.B / ZEXT.H
+REV8
 ```
-
-are too operand-heavy for a clean unrestricted 16-bit encoding with 16 registers.
-
-They are strong candidates for the future 32-bit instruction space.
-
-## 14.2 Full four-register select
-
-```text
-SEL rd, rt, rf, rc
-```
-
-would consume all 16 bits merely naming four registers, before any opcode or length discriminator is encoded.
-
-The base therefore uses destructive `CMOV` plus the `SEL` pseudo.
-
-## 14.3 Fully general scaled loads and stores
-
-The base directly includes the two high-value word-load forms:
-
-```text
-LDX.W  rd, [base + index]
-LDA.W  rd, [base + index*4]
-```
-
-It does not attempt to encode every combination of:
-
-- byte / halfword / word
-- load / store
-- scale x1 / x2 / x4 / x8
-- arbitrary displacement
-- pre/post update
-
-That full addressing matrix belongs in the future 32-bit encoding space if workload measurements justify it.
-
-## 14.4 Additional boolean helpers
-
-`ANDN`, `ORN`, and `XNOR` are useful but can be synthesized from `NOT` plus the basic logic operations. They are candidates for later extensions if profiling shows enough density or performance benefit.
-
-## 14.5 Single-bit operations
-
-`BSET`, `BCLR`, and `BINV` remain candidates for a later encoding pass. The base should not allocate them until real compiler output is measured against the remaining opcode space.
 
 ---
 
-# 15. Programming examples
+# 24. Assembler selection rules
 
-## 15.1 Array load
+The assembler uses the same mnemonic for short and wide forms where semantics are identical.
 
-C:
-
-```c
-x = array[i];
-```
-
-SIA:
+Examples:
 
 ```asm
-LDA.W   r3, [r1 + (r2 << 2)]
+SUB r1, r2          ; 16-bit destructive form
+SUB r1, r2, r3      ; 32-bit non-destructive form
+
+ADDI r4, -1         ; 16-bit if immediate fits
+ADDI r4, r5, 1200   ; 32-bit
+
+CMPLT r1, r2        ; 16-bit: r1 = mask(r1 < r2)
+CMPLT r1, r2, r3    ; 32-bit: r1 = mask(r2 < r3)
 ```
 
-One 16-bit instruction performs the scale, address add, and word load.
+Assemblers may automatically choose an equivalent short encoding when it does not alter register semantics.
 
-## 15.2 Pointer walk
-
-C:
-
-```c
-x = *p++;
-```
-
-SIA:
-
-```asm
-LW      r1, [r2]+
-```
-
-## 15.3 Reverse pointer walk
-
-C:
-
-```c
-x = *p;
-p -= 4;
-```
-
-SIA:
-
-```asm
-LW      r1, [r2]-
-```
-
-## 15.4 Conditional minimum using compare mask and CMOV
-
-```asm
-MOV     r7, r1
-CMPLT   r7, r2
-MOV     r3, r2
-CMOV    r3, r1, r7
-```
-
-For ordinary signed minimum, the dedicated `MIN` instruction is shorter:
-
-```asm
-MOV     r3, r1
-MIN     r3, r2
-```
-
-## 15.5 Counted loop
-
-```asm
-loop:
-        ; body
-        ADDI    r4, -1
-        BNZ     r4, loop
-```
-
-A dedicated decrement-and-branch instruction is not yet allocated in v0.1. It remains a candidate for code-density measurement.
+A disassembler should display the architectural operation rather than force a `.W` suffix except where instruction length is itself important to debugging or relocation.
 
 ---
 
-# 16. Extension model
+# 25. Deliberately deferred topics
 
-SIA is intended to grow through explicitly named extensions and implementation profiles.
+This document defines the integer execution architecture only.
 
-The current document defines only the integer base `SIA32-I`.
+The following require separate architectural work rather than being silently treated as implementation details:
 
-Possible future architectural work includes:
+- atomics and the memory consistency model;
+- memory fences and instruction-cache synchronization;
+- privileged state and exception-vector architecture;
+- MMU and protection;
+- floating point;
+- vectors/SIMD/media operations;
+- virtualization;
+- debug architecture.
 
-- 32-bit extended instruction encodings using the reserved length bit
-- integer multiply/divide extension
-- atomic-memory extension
-- bit-manipulation extension
-- privileged architecture
-- MMU and protection architecture
-- floating-point extension
-- vector/SIMD extension
-
-None of those are required to implement the integer base described here.
-
-An implementation shall not repurpose an encoding marked reserved by this specification unless a later SIA specification assigns it.
+These later specifications may use reserved wide opcode space but may not change existing `SIA32-I` semantics.
 
 ---
 
-# 17. Open decisions before v1.0
+# 26. Open decisions before v1.0
 
-The following items should be resolved using small compiler and code-density experiments rather than intuition alone.
+The largest remaining questions are:
 
-1. **Auto-update direction** — keep the current post-increment/post-decrement word forms, or replace decrement with pre-decrement for stack use.
-2. **Indexed-load budget** — retain both unscaled `LDX.W` and x4 `LDA.W`, or use one of those large opcode regions for another three-register operation.
-3. **Three-register arithmetic** — decide whether any operation beyond `ADD` deserves an unrestricted three-register encoding.
-4. **Branch-on-false** — determine whether a second short conditional branch materially improves generated code enough to spend encoding space.
-5. **DBNZ** — measure whether a decrement-and-branch instruction is worth a dedicated encoding.
-6. **Bit operations** — measure `BSET`, `BCLR`, `BINV`, `ANDN`, `ORN`, and `XNOR` frequency.
-7. **Scalar displacement** — determine whether `[base+4]` and `[base+8]` are the best direct word offsets or whether a different compact displacement scheme gives better density.
-8. **Large constants** — decide whether literal pools are sufficient until the 32-bit extension, or whether more 16-bit immediate-building support is required.
-9. **Misaligned access** — retain mandatory traps in the base or define architecturally supported unaligned loads/stores.
-10. **Exact opcode values** — freeze only after assembler, emulator, and compiler experiments validate the format allocation.
+1. Whether the four expensive short three-register primary regions are all justified after real code-density measurements.
+2. Whether both short `LDX.W` and `LDA.W` survive once wide generalized loads exist.
+3. Whether `DBNZ` merits a dedicated 16-bit encoding in addition to its mandatory wide form.
+4. Whether `BNEZ` deserves a separate short encoding or remains an alias/sequence around the current control map.
+5. Whether the wide generalized-memory displacement should remain 7 byte bits or sacrifice one update mode for a larger displacement.
+6. Whether wide `LEA` should use a 10-bit or larger displacement.
+7. Whether `ZAP`/`ZAPNOT`-style byte masking earns a place in the integer base.
+8. Whether a compact register-list `PUSHM`/`POPM` operation is worth the precise-exception and restart complexity.
+9. Whether `REV16` or bit-reverse operations have enough general systems value for the base.
+10. The exact opcode numbers and relocation encodings.
+
+The correct way to freeze these decisions is to build an assembler, emulator, and compiler backend, compile representative systems and application code, and measure both bytes and dynamic instruction count.
 
 ---
 
-# 18. Current design position
+# 27. Current design position
 
-The current SIA32-I draft makes the following core bets:
+SIA32-I v0.2 makes the following architectural commitments:
 
-- **16 registers are enough** for a dense 16-bit RISC ISA.
-- **16-bit instructions are the native ISA**, not a secondary compressed mode.
-- **one instruction-length bit is worth reserving now** for clean future 32-bit growth.
-- **flags are unnecessary**; comparisons should produce normal integer masks.
-- **conditional move is worth a full three-register encoding**.
-- **direct indexed and scaled array loads are worth encoding** because they remove common address-generation sequences.
-- **auto-update memory operations are worth keeping** for dense pointer-walking code.
-- **full bitfield and general addressing forms should wait for 32-bit encodings** rather than damaging the regularity of the 16-bit base.
+- **16 registers** and four-bit register identifiers.
+- **16-bit and 32-bit instructions are both mandatory.**
+- **No ISA mode switch.**
+- **The first halfword determines instruction length.**
+- **No arithmetic flags register.**
+- **Comparisons produce full-register masks.**
+- **Short `CMOV` and wide full `SEL` are both architectural.**
+- **Bitfield extract/insert is mandatory.**
+- **Scaled/indexed loads and stores are mandatory.**
+- **Pre/post base update is architectural.**
+- **Shift-and-add address generation is architectural through `LEA`.**
+- **PC-relative address and literal formation are architectural.**
+- **Multiply/divide uses ordinary GPR results, with no hidden HI/LO state.**
+- **No delay slots.**
+- **No media/SIMD family is defined in the integer base.**
 
-This is the baseline to test against generated code before the v1.0 encoding is frozen.
+The architecture is therefore best described as a **density-first mixed-width RISC**: a small and aggressive 16-bit common path backed by a mandatory 32-bit form that prevents code-density goals from impoverishing the ISA.
