@@ -1,21 +1,14 @@
 # Scalable Instruction Architecture (SIA)
 
-## Integer Architecture — Draft v0.3
+## Integer Architecture — Draft v0.4
 
-SIA is a compact, scalable 32-bit RISC instruction set architecture built around **mandatory mixed 16-bit and 32-bit instructions**.
+SIA is a compact, scalable 32-bit RISC instruction set architecture with a **fixed 16-bit instruction width** in the base architecture.
 
-The first architecture defined here is the integer-only `SIA32-I` base. It has 16 architectural integer registers, no condition-code register, no branch delay slots, and no floating-point or vector state.
+The first architecture defined here is the integer-only `SIA32-I` base. It has 16 architectural integer registers, no arithmetic condition-code register, no branch delay slots, and no floating-point or vector state.
 
-SIA has two equally architectural instruction lengths:
+The central design objective is a **32-bit machine with a dense 16-bit instruction stream**. Common operations are encoded directly. Less common rich operations may require two or more 16-bit instructions rather than introducing a second mandatory instruction length.
 
-- **short** — 16-bit instructions for common operations and maximum code density;
-- **wide** — 32-bit instructions for richer operand forms, larger immediates, generalized address generation, and operations that cannot be encoded cleanly in 16 bits.
-
-Both lengths are mandatory. There is no compressed mode, wide mode, compatibility mode, or ISA-mode switch. A conforming `SIA32-I` processor executes arbitrary interleaved 16-bit and 32-bit instructions.
-
-The design objective is an **extended 16-bit RISC**: common operations should usually fit in 16 bits, while the mandatory 32-bit form prevents code-density goals from impoverishing the instruction set.
-
-Numeric opcode assignments remain provisional until assembler, compiler, emulator, and code-density experiments are available.
+Numeric opcode assignments remain provisional until assembler, emulator, compiler, and code-density experiments are available.
 
 ---
 
@@ -25,24 +18,23 @@ Numeric opcode assignments remain provisional until assembler, compiler, emulato
 
 - 32-bit integer and address model.
 - Exactly 16 architectural integer registers.
-- Four-bit register identifiers everywhere.
-- Native 16-bit instructions for common operations.
-- Native 32-bit instructions as a mandatory part of the same base ISA.
-- The first halfword determines instruction length without mode state.
-- No condition-code or arithmetic flags register.
+- Four-bit register identifiers.
+- Every base instruction is exactly 16 bits.
+- No instruction-set mode switch.
+- No arithmetic flags register.
 - Compare instructions produce full-register Boolean masks.
-- Conditional move and full conditional select are architectural operations.
-- Common pointer and stack walks have update addressing.
-- Register-indexed and scaled-array memory operations are architectural.
-- Bitfield extract and insert are architectural.
+- Conditional move is architectural.
+- Common pointer and stack walks use update addressing.
+- Register-indexed scaled word load/store is architectural.
+- Pair and four-register block load/store are architectural.
+- PC-relative literal loading is first-class.
 - Explicit carry/borrow arithmetic is architectural without hidden flags.
-- Multi-register load/store is architectural.
-- PC-relative address and literal formation are first-class operations.
+- Common counted loops have a compact form.
 - No branch delay slots.
 - Precise exceptions.
 - Future extensions may add functionality but may not redefine existing encodings.
 
-SIA is deliberately not a 32-bit ISA with a separate compressed operating mode. The 16-bit and 32-bit forms are parts of one instruction set.
+SIA deliberately accepts that some uncommon operations take two 16-bit instructions. A two-instruction sequence still occupies four bytes while preserving simple fixed-width fetch, decode, restart, and branch-target rules.
 
 ---
 
@@ -85,91 +77,75 @@ The ABI is separate from core instruction semantics.
 
 The PC addresses bytes.
 
-A short instruction advances the PC by 2 bytes.
+Every instruction is 2 bytes and every valid instruction address is 2-byte aligned.
 
-A wide instruction advances the PC by 4 bytes.
-
-Every valid instruction address is at least 2-byte aligned.
+Normal sequential execution advances the PC by 2 bytes.
 
 There are no architecturally visible branch delay slots.
 
----
+Because all v0.4 base instructions are the same size:
 
-# 3. Instruction length encoding
-
-Instructions are fetched as 16-bit halfwords.
-
-For the first halfword `H0`:
-
-```text
-H0[15] = 0    16-bit short instruction
-H0[15] = 1    32-bit wide instruction; consume H0 and following H1
-```
-
-A 32-bit instruction may begin at any 2-byte-aligned address. It is not required to be 4-byte aligned.
-
-In memory, `H0` is always the lower-addressed halfword. `H1` immediately follows it.
-
-There is no instruction-set mode bit in the PC or status register.
-
-## 3.1 Crossing cache-line and virtual-page boundaries
-
-A wide instruction may cross a cache-line, physical-page, or virtual-page boundary.
-
-Conceptually:
-
-```text
-H0 = instruction_fetch16(PC)
-
-if H0[15] == 0:
-    instruction = H0
-else:
-    H1 = instruction_fetch16(PC + 2)
-    instruction = H0:H1
-```
-
-Every byte belonging to an instruction must reside in memory for which instruction execution is permitted.
-
-If translation, protection, or instruction fetch of any portion fails:
-
-- the instruction performs no architectural operation;
-- the saved exception PC is the address of `H0`;
-- the fault-address register identifies the virtual address whose fetch failed;
-- restart occurs from `H0` after the fault is serviced.
-
-Software and linkers may choose to avoid page-crossing wide instructions for performance, but this is not an architectural requirement.
-
-A control transfer is valid only when its target is the first halfword of an instruction. Software and toolchains are responsible for maintaining this property for indirect control flow; implementations are not required to reconstruct instruction boundaries by scanning backward.
+- no instruction may straddle a virtual-page boundary unless the 2-byte instruction itself straddles one, which cannot happen with page sizes aligned to at least 2 bytes;
+- branch targets are always 2-byte aligned instruction boundaries;
+- instruction restart needs no variable-length reconstruction.
 
 ---
 
-# 4. Why SIA uses both 16 and 32 bits
+# 3. Encoding philosophy
 
-After reserving the length bit, a short instruction has 15 remaining bits.
+The base encoding uses the full 16-bit word.
 
-Three unrestricted registers require:
+Three unrestricted registers consume 12 bits:
 
 ```text
 4 + 4 + 4 = 12 bits
 ```
 
-That leaves only three bits for identifying the operation.
+leaving only four bits for selecting the operation. Three-register encodings are therefore treated as scarce and are allocated only to high-value common operations.
 
-Four unrestricted registers require all 16 bits before an opcode is encoded at all.
+Two-register destructive forms are preferred for less common ALU operations. For example:
 
-SIA therefore uses 16-bit encodings only where they provide strong density value. Richer forms use the mandatory wide encoding rather than contorting the architecture around tiny fields, implicit registers, or hidden condition state.
+```asm
+MOV r7, r3
+AND r7, r4
+```
 
-The intended compiler policy is:
+occupies the same four instruction bytes as a hypothetical 32-bit three-register `AND r7,r3,r4`, at the cost of one extra dynamic instruction.
 
-1. Prefer a short instruction whenever it expresses the desired operation directly.
-2. Use a wide instruction when it avoids extra moves, extra address-generation instructions, or destructive two-address constraints.
-3. Optimize for both bytes and dynamic instruction count.
+Compiler policy should prefer:
+
+1. a direct 16-bit operation when available;
+2. a destructive two-address form when register allocation permits;
+3. a two-instruction sequence when preserving both sources is required;
+4. literal pools, veneers, and address-generation sequences for uncommon large-range cases.
+
+---
+
+# 4. Reserved future extension mechanism
+
+SIA v0.4 does **not** define any 32-bit instruction.
+
+One primary opcode region is permanently reserved as `EXT` for future architectural growth. In v0.4 every instruction in this region raises the normal illegal-instruction exception.
+
+A future architecture may define the reserved prefix as the first halfword of a longer 32-bit, 48-bit, or other extended instruction, but no such format is part of `SIA32-I` v0.4.
+
+The intent is:
+
+```text
+SIA32-I v0.4 implementation:
+    every valid instruction = 16 bits
+
+future implementation, only if justified:
+    reserved EXT prefix + continuation halfword(s)
+```
+
+The extension prefix is not stateful. If future longer instructions are defined, the prefix and continuation halfword(s) will constitute one architectural instruction.
 
 ---
 
 # 5. Boolean and conditional model
 
-SIA has no arithmetic flags register.
+SIA has no arithmetic condition-code register.
 
 Scalar comparisons write a normal integer register.
 
@@ -185,23 +161,33 @@ False is represented as:
 0x00000000
 ```
 
-This makes compare results useful as Boolean conditions and as masks.
-
-Example:
+The base conditional operation is destructive `CMOV`:
 
 ```asm
-CMPLT   r7, r1, r2
-SEL     r3, r1, r2, r7
+CMOV rd, rs, rc
 ```
 
-Conceptually:
+Semantics:
 
 ```c
-r7 = ((int32_t)r1 < (int32_t)r2) ? 0xFFFFFFFFu : 0;
-r3 = (r7 != 0) ? r1 : r2;
+if (rc != 0)
+    rd = rs;
 ```
 
-The short ISA also contains destructive `CMOV` for cases where a full four-register select is unnecessary.
+A full four-register select is intentionally not architectural.
+
+```asm
+SEL rd, rt, rf, rc
+```
+
+is synthesized as:
+
+```asm
+MOV  rd, rf
+CMOV rd, rt, rc
+```
+
+Both sequences occupy four bytes if a hypothetical full select would otherwise require a 32-bit instruction.
 
 ---
 
@@ -221,42 +207,46 @@ The base architecture does not include partial-word unaligned load/store instruc
 
 ---
 
-# 7. Short 16-bit instruction space
+# 7. Provisional primary opcode map
 
-## 7.1 Primary map
-
-```text
-15   14:12                         0
-+--+--------+-----------------------+
-|0 | primary|        payload        |
-+--+--------+-----------------------+
-```
-
-Initial assignments:
-
-| `H0[14:12]` | Format / instruction |
-|---|---|
-| `000` | `ADD rd, ra, rb` |
-| `001` | `CMOV rd, rs, rc` |
-| `010` | `LDX.W rd, [rb + ri]` |
-| `011` | `LDA.W rd, [rb + (ri << 2)]` |
-| `100` | two-register ALU group |
-| `101` | 7-bit immediate group |
-| `110` | scalar memory group |
-| `111` | control-flow / system group |
-
-The exact short allocation is provisional. In particular, the two large indexed-load regions must be justified by code-density measurements now that generalized wide memory addressing is mandatory.
-
-## 7.2 Short three-register operations
+The following map is provisional and is intended to demonstrate that the required base fits comfortably in a fixed 16-bit encoding.
 
 ```text
-15  14:12  11:8  7:4  3:0
-+--+------+-----+----+----+
-|0 | op   | rd  | ra | rb |
-+--+------+-----+----+----+
+15:12     use
+-----     -------------------------------------------------
+0000      ADD three-register
+0001      CMOV three-register
+0010      scaled indexed word load
+0011      scaled indexed word store
+0100      arithmetic / compare group
+0101      logic / shift group
+0110      small immediate group
+0111      scalar memory group
+1000      pair / four-register memory group
+1001      PC-relative literal load
+1010      conditional / counted branch group
+1011      direct branch / call group
+1100      misc / system / standard extension group
+1101      reserved base growth
+1110      reserved base growth
+1111      reserved future EXT prefix
 ```
 
-### `ADD rd, ra, rb`
+This leaves three complete primary regions unavailable to ordinary v0.4 allocation:
+
+- `1101` — reserved 16-bit base growth;
+- `1110` — reserved 16-bit base growth;
+- `1111` — future extension prefix.
+
+Thus 18.75% of the primary encoding space remains completely reserved before counting unused subfunctions within allocated groups.
+
+---
+
+# 8. High-value three-register operations
+
+Three-register primary slots are scarce because three unrestricted registers consume 12 of the 16 bits.
+
+## 8.1 `ADD rd, ra, rb`
 
 ```c
 rd = ra + rb;
@@ -268,134 +258,252 @@ rd = ra + rb;
 ADD rd, r0, rs
 ```
 
-### `CMOV rd, rs, rc`
+## 8.2 `CMOV rd, rs, rc`
 
 ```c
 if (rc != 0)
     rd = rs;
 ```
 
-If `rc == 0`, `rd` is unchanged.
+## 8.3 Scaled indexed word load
 
-### `LDX.W rd, [rb + ri]`
-
-```c
-rd = load_u32(rb + ri);
+```asm
+LDA.W rd, [rb + ri*4]
 ```
 
-The index is an unscaled byte offset.
-
-### `LDA.W rd, [rb + (ri << 2)]`
+Semantics:
 
 ```c
 rd = load_u32(rb + (ri << 2));
 ```
 
-This is the compact fast path for a 32-bit array load.
+This is the compact fast path for C-style 32-bit arrays and pointer tables.
 
-## 7.3 Destination-zero short escapes
+## 8.4 Scaled indexed word store
 
-The otherwise useless result-to-`r0` patterns of the four three-register groups are reclaimed.
+```asm
+STA.W rs, [rb + ri*4]
+```
 
-| Parent slot with `rd=r0` | Escape instruction |
-|---|---|
-| `ADD` | `CLZ rd, rs` |
-| `CMOV` | `CTZ rd, rs` |
-| `LDX.W` | `CPOP rd, rs` |
-| `LDA.W` | `NOT rd, rs` |
+Semantics:
+
+```c
+store_u32(rb + (ri << 2), rs);
+```
+
+The base does not require an unrestricted byte-indexed three-register load/store. Unscaled byte offsets can be synthesized with `ADD` followed by a scalar load/store when necessary.
 
 ---
 
-# 8. Short integer ALU group
+# 9. Destination-zero escapes
+
+Writes to `r0` are normally discarded. Selected otherwise-useless destination-zero encodings may be reclaimed for useful unary operations.
+
+Candidate uses include:
 
 ```text
-15 14:12 11:8 7:4 3:0
-+--+-----+----+---+----+
-|0 | 100 | rd |rs | fn |
-+--+-----+----+---+----+
+CLZ
+CTZ
+CPOP
+REV8
 ```
 
-These are destructive two-address forms: the old value of `rd` is the first source.
+Exact assignments are provisional until the final primary map is frozen.
 
-| `fn` | Instruction | Semantics |
-|---|---|---|
-| `0` | `SUB rd, rs` | `rd = rd - rs` |
-| `1` | `ADDO rd, rs` | checked signed add |
-| `2` | `SUBO rd, rs` | checked signed subtract |
-| `3` | `AND rd, rs` | `rd &= rs` |
-| `4` | `OR rd, rs` | `rd |= rs` |
-| `5` | `XOR rd, rs` | `rd ^= rs` |
-| `6` | `SHL rd, rs` | logical left shift |
-| `7` | `SHR rd, rs` | logical right shift |
-| `8` | `SAR rd, rs` | arithmetic right shift |
-| `9` | `CMPEQ rd, rs` | equality mask |
-| `A` | `CMPLT rd, rs` | signed less-than mask |
-| `B` | `CMPLTU rd, rs` | unsigned less-than mask |
-| `C` | `MIN rd, rs` | signed minimum |
-| `D` | `MINU rd, rs` | unsigned minimum |
-| `E` | `MAX rd, rs` | signed maximum |
-| `F` | `MAXU rd, rs` | unsigned maximum |
+---
 
-`O` means checked arithmetic overflow. `ADDO` and `SUBO` trap on signed overflow.
+# 10. Arithmetic and compare group
 
-The `C` suffix is reserved for carry semantics and is not used to mean checked arithmetic.
+Two-register arithmetic operations are destructive:
+
+```text
+operation rd, rs
+```
+
+where the old value of `rd` is the first source.
+
+Required operations include:
+
+```text
+SUB
+ADDO
+SUBO
+CMPEQ
+CMPLT
+CMPLTU
+MIN
+MINU
+MAX
+MAXU
+```
+
+`ADDO` and `SUBO` trap on signed overflow.
+
+Comparison instructions produce SIA Boolean masks (`0` or `0xFFFFFFFF`).
+
+Unsigned and signed comparisons are distinct operations.
+
+Additional comparison relations should normally be synthesized by operand reversal and/or Boolean inversion rather than consuming redundant opcode space.
+
+---
+
+# 11. Logic and shift group
+
+SIA uses destructive two-register logic operations.
+
+The basic Boolean families are:
+
+```text
+AND
+OR
+XOR
+```
+
+The encoding may include source-negation modifiers so the same datapath can directly express useful variants such as:
+
+```asm
+AND.pn rd, rs     ; rd = rd & ~rs
+AND.np rd, rs     ; rd = ~rd & rs
+AND.nn rd, rs     ; rd = ~rd & ~rs
+OR.pn  rd, rs
+OR.np  rd, rs
+OR.nn  rd, rs
+XOR.pn rd, rs     ; equivalent to XNOR
+```
+
+Exact modifier syntax and bit assignments remain provisional, but the architecture should prefer source-negation modifiers over separate `ANDN`, `ORN`, `NOR`, `NAND`, and `XNOR` opcodes where this reduces encoding pressure without increasing the logic critical path.
+
+Required shifts are:
+
+```text
+SHL
+SHR
+SAR
+```
 
 Register shift counts use the low five bits of the shift-count register.
 
----
-
-# 9. Short immediate group
+Immediate shift forms for all counts `0..31` are strongly preferred if they can be encoded without displacing higher-value operations:
 
 ```text
-15 14:12 11 10:7 6:0
-+--+-----+--+----+-------+
-|0 | 101 |op| rd | imm7  |
-+--+-----+--+----+-------+
+SHLI
+SHRI
+SARI
 ```
 
-`imm7` is signed in the range `-64..+63`.
+Rotates are desirable but remain provisional pending encoding experiments.
 
-| `op` | Instruction |
-|---|---|
-| `0` | `LI rd, imm7` |
-| `1` | `ADDI rd, imm7` |
+---
+
+# 12. Explicit carry and borrow arithmetic
+
+SIA has no architectural carry flag.
+
+Multi-precision arithmetic uses an explicit general-purpose register containing a Boolean carry/borrow mask:
+
+```text
+false / no carry / no borrow = 0x00000000
+true  / carry    / borrow    = 0xFFFFFFFF
+```
+
+The compact forms are destructive:
+
+```asm
+ADC rd, rs, rc
+SBB rd, rs, rc
+```
+
+`rc` is carry/borrow input and output.
+
+Conceptually for `ADC`:
 
 ```c
-LI:   rd = sign_extend_7(imm7);
-ADDI: rd = rd + sign_extend_7(imm7);
+cin = (rc != 0) ? 1 : 0;
+x = (uint64_t)rd + (uint64_t)rs + cin;
+rd = (uint32_t)x;
+rc = (x >> 32) ? 0xFFFFFFFFu : 0;
 ```
+
+For `SBB`:
+
+```c
+bin = (rc != 0) ? 1 : 0;
+x = (uint64_t)rs + bin;
+borrow = ((uint64_t)rd < x);
+rd = rd - (uint32_t)x;
+rc = borrow ? 0xFFFFFFFFu : 0;
+```
+
+Example 64-bit addition when the first operand may be overwritten:
+
+```asm
+LI   r7, 0
+ADC  r1, r3, r7
+ADC  r2, r4, r7
+```
+
+Result is `r2:r1`, with final carry in `r7`.
 
 ---
 
-# 10. Short scalar memory group
+# 13. Small immediates
+
+The base must provide compact small-immediate operations.
+
+At minimum:
 
 ```text
-15 14:12 11:8 7:4 3:0
-+--+-----+----+----+------+
-|0 | 110 | rv | rb | mode |
-+--+-----+----+----+------+
+LI
+ADDI
 ```
 
-| `mode` | Instruction |
-|---|---|
-| `0` | `LB rv, [rb]` |
-| `1` | `LBU rv, [rb]` |
-| `2` | `LH rv, [rb]` |
-| `3` | `LHU rv, [rb]` |
-| `4` | `LW rv, [rb]` |
-| `5` | `SB rv, [rb]` |
-| `6` | `SH rv, [rb]` |
-| `7` | `SW rv, [rb]` |
-| `8` | `LW rv, [rb + 4]` |
-| `9` | `SW rv, [rb + 4]` |
-| `A` | `LW rv, [rb + 8]` |
-| `B` | `SW rv, [rb + 8]` |
-| `C` | `LW rv, [rb]+` |
-| `D` | `SW rv, [rb]+` |
-| `E` | `LW rv, -[rb]` |
-| `F` | `SW rv, -[rb]` |
+A candidate format provides a signed 7-bit immediate:
 
-Update forms:
+```text
+LI   rd, -64..63
+ADDI rd, -64..63
+```
+
+Larger constants are formed through PC-relative literal loads rather than requiring a second instruction width.
+
+Large logical immediates are not mandatory base instructions. A compiler may use:
+
+```asm
+LDPC.W rT, constant
+AND    rd, rT
+```
+
+or the corresponding logic operation.
+
+---
+
+# 14. Scalar memory operations
+
+Scalar memory operations use a value register, base register, and compact addressing-mode field.
+
+Required operations include:
+
+```text
+LB
+LBU
+LH
+LHU
+LW
+SB
+SH
+SW
+```
+
+Required word update forms include:
+
+```asm
+LW rv, [rb]+
+SW rv, [rb]+
+LW rv, -[rb]
+SW rv, -[rb]
+```
+
+Semantics:
 
 ```text
 LW rv,[rb]+     load from rb, then rb += 4
@@ -404,37 +512,182 @@ LW rv,-[rb]     rb -= 4, then load from rb
 SW rv,-[rb]     rb -= 4, then store to rb
 ```
 
-This provides natural forward pointer walking and stack operations:
+This provides natural forward pointer walking and scalar stack operations:
 
 ```asm
 SW r4, -[sp]     ; push
 LW r4, [sp]+     ; pop
 ```
 
-For an updating load, `rv == rb` is illegal.
+For an updating load, destination equal to base is illegal.
+
+Small fixed word offsets such as `[rb+4]` and `[rb+8]` remain provisional. Pair/quad transfers reduce their importance, so unused scalar-memory modes should be preserved unless profiling demonstrates strong value.
 
 ---
 
-# 11. Short control flow
+# 15. Pair and four-register load/store
 
-There are no delay slots.
+SIA replaces the previous arbitrary 16-register-mask `LDM/STM` design with bounded multiple-register transfers.
 
-## 11.1 Branch on nonzero
+The required operations are:
+
+```text
+LDP   load a pair of consecutive 32-bit registers
+STP   store a pair of consecutive 32-bit registers
+LD4   load four consecutive 32-bit registers
+ST4   store four consecutive 32-bit registers
+```
+
+The encoded register names the first register in the group.
+
+Examples:
 
 ```asm
-BNZ rs, target
+LDP r4:r5, [r8]
+LDP r4:r5, [r8]+
+STP r4:r5, [r8]
+STP r4:r5, [r8]+
+STP r4:r5, -[sp]
+
+LD4 r4:r7, [r8]
+LD4 r4:r7, [r8]+
+ST4 r4:r7, [r8]
+ST4 r4:r7, [r8]+
+ST4 r4:r7, -[sp]
 ```
 
-Conceptually:
+Pair transfer moves exactly 8 bytes.
+
+Four-register transfer moves exactly 16 bytes.
+
+The memory order is increasing register number to increasing address.
+
+For example:
+
+```asm
+ST4 r4:r7, [r8]
+```
+
+stores:
+
+```text
+[r8 +  0] = r4
+[r8 +  4] = r5
+[r8 +  8] = r6
+[r8 + 12] = r7
+```
+
+Post-increment adds 8 for pair operations and 16 for four-register operations.
+
+Pre-decrement subtracts the complete transfer size before the first access.
+
+When writeback is enabled, the base register may not overlap a destination register of a load.
+
+Register groups that would wrap beyond `r15` are illegal.
+
+These instructions are not permitted for device/MMIO mappings. Device memory uses scalar accesses so externally visible side effects remain explicit and restartable.
+
+## 15.1 Function-call example
+
+A typical callee can preserve six registers in four instruction bytes:
+
+```asm
+ST4 r9:r12,  -[sp]
+STP r14:r15, -[sp]
+```
+
+Restore:
+
+```asm
+LDP r14:r15, [sp]+
+LD4 r9:r12,  [sp]+
+RET
+```
+
+This retains most of the code-density benefit of arbitrary register-list transfers while bounding every multiple-transfer instruction to exactly two or four memory operations.
+
+---
+
+# 16. PC-relative literal load
+
+PC-relative data access is considered sufficiently common to deserve a dedicated base instruction.
+
+Required:
+
+```asm
+LDPC.W rd, target
+```
+
+The instruction loads a 32-bit word from a signed PC-relative displacement.
+
+A candidate encoding uses an 8-bit word-scaled displacement, providing approximately a ±512-byte literal-pool range.
+
+Example:
+
+```asm
+LDPC.W r4, .LC17
+...
+.LC17:
+    .word 0x12345678
+```
+
+The assembler and linker are expected to place literal pools close enough to their uses.
+
+The exact displacement width and scale remain open and must be determined from compiled-code measurements.
+
+A separate `ADR/ADDPC` instruction is not yet mandatory. Addresses may be loaded from literal pools when necessary.
+
+---
+
+# 17. Address generation
+
+SIA deliberately does not require a generalized `base + scaled-index + displacement` `LEA` instruction in the base.
+
+The two dominant array-memory operations are already directly supported:
+
+```asm
+LDA.W rd, [base + index*4]
+STA.W rs, [base + index*4]
+```
+
+Other address calculations may be composed from simple instructions.
+
+A compact three-register `SH2ADD`-style operation remains a candidate if compiler measurements show that explicit formation of `base + index*4` is sufficiently frequent outside loads/stores.
+
+No `SH1ADD`, `SH2ADD`, or `SH3ADD` operation is frozen in v0.4.
+
+---
+
+# 18. Conditional and counted branches
+
+The base should provide compact register-test branches.
+
+Required:
+
+```asm
+BNZ  rs, target
+DBNZ rs, target
+```
+
+`BNZ` branches when `rs != 0`.
+
+`DBNZ` performs:
 
 ```c
+rs = rs - 1;
 if (rs != 0)
-    pc = next_pc + sign_extend_7(disp7) * 2;
+    pc = target;
 ```
 
-## 11.2 Direct branch and call
+A compact `BZ` is desirable if it fits naturally in the same encoding group.
 
-Short direct branch/call uses a signed halfword displacement.
+Direct compare-and-branch operations such as `BLT ra,rb,target` are intentionally not mandatory. They can be synthesized with a compare that produces a Boolean mask followed by `BNZ`/`BZ`.
+
+---
+
+# 19. Direct branch and call
+
+The base provides direct relative control flow:
 
 ```asm
 B  target
@@ -443,525 +696,75 @@ BL target
 
 `BL` writes the address of the following instruction to `r14`.
 
-## 11.3 Register control
+A candidate encoding uses an 11-bit signed halfword displacement, giving approximately ±2 KiB reach.
 
-Required compact control operations include:
+Far transfers use linker-generated veneers and/or PC-relative literal loads.
 
-```text
-JR rs
-JALR rs
-RET
-TRAP imm4
-BREAK
-NOP
-```
-
-`RET` is an alias for `JR r14`.
-
----
-
-# 12. Mandatory 32-bit wide encoding
-
-Every `SIA32-I` implementation must implement the wide instruction format.
-
-A wide instruction consists of `H0` and `H1`:
-
-```text
-H0:
-15  14:8   7:4  3:0
-+--+------+----+----+
-|1 | xop  | A  | B  |
-+--+------+----+----+
-
-H1:
-15                     0
-+-----------------------+
-|      operation data   |
-+-----------------------+
-```
-
-`xop` is a seven-bit wide-operation code.
-
-`A` and `B` are normally register fields but may become immediate bits for formats that do not need two registers.
-
-Wide opcode allocation is grouped conceptually as follows:
-
-| `xop` range | Use |
-|---|---|
-| `00-0F` | three-register arithmetic and logic |
-| `10-1F` | compare, select, bitfield, carry |
-| `20-2F` | immediate and constant formation |
-| `30-3F` | generalized memory and address generation |
-| `40-4F` | control flow |
-| `50-5F` | extension space including optional multiply/divide |
-| `60-6F` | bit manipulation and byte operations |
-| `70-7F` | reserved base growth |
-
-Exact opcode values remain provisional.
-
----
-
-# 13. Wide arithmetic and logic
-
-Wide three-register forms remove the destructive destination constraint of the short ALU group.
-
-Required operations include:
-
-```text
-ADD     rd, ra, rb
-SUB     rd, ra, rb
-ADDO    rd, ra, rb
-SUBO    rd, ra, rb
-
-AND     rd, ra, rb
-OR      rd, ra, rb
-XOR     rd, ra, rb
-ANDN    rd, ra, rb
-ORN     rd, ra, rb
-XNOR    rd, ra, rb
-
-SHL     rd, ra, rb
-SHR     rd, ra, rb
-SAR     rd, ra, rb
-ROL     rd, ra, rb
-ROR     rd, ra, rb
-
-MIN     rd, ra, rb
-MINU    rd, ra, rb
-MAX     rd, ra, rb
-MAXU    rd, ra, rb
-```
-
-Boolean-not combinations:
-
-```c
-ANDN: rd = ra & ~rb;
-ORN:  rd = ra | ~rb;
-XNOR: rd = ~(ra ^ rb);
-```
-
----
-
-# 14. Explicit carry and borrow arithmetic
-
-SIA does not have an architectural carry flag.
-
-Multi-precision arithmetic uses an explicit general-purpose register containing a SIA Boolean mask:
-
-```text
-false / no carry / no borrow = 0x00000000
-true  / carry    / borrow    = 0xFFFFFFFF
-```
-
-The base ISA includes wide four-register carry operations:
-
-```text
-ADC rd, rc, ra, rb
-SBB rd, rc, ra, rb
-```
-
-`rc` is both carry/borrow input and carry/borrow output.
-
-## 14.1 `ADC`
-
-Conceptually:
-
-```c
-cin = (rc != 0) ? 1 : 0;
-x = (uint64_t)ra + (uint64_t)rb + cin;
-rd = (uint32_t)x;
-rc = (x >> 32) ? 0xFFFFFFFFu : 0;
-```
-
-## 14.2 `SBB`
-
-`SBB` uses explicit borrow semantics rather than an inverted carry convention:
-
-```c
-bin = (rc != 0) ? 1 : 0;
-x = (uint64_t)rb + bin;
-rd = ra - (uint32_t)x;
-borrow = ((uint64_t)ra < x);
-rc = borrow ? 0xFFFFFFFFu : 0;
-```
-
-Example 64-bit addition on SIA32:
+Example far call sequence:
 
 ```asm
-LI      r7, 0
-ADC     r8, r7, r1, r3
-ADC     r9, r7, r2, r4
-```
-
-Result is `r9:r8`, with final carry in `r7`.
-
-`ADDO`/`SUBO` remain separate checked signed-overflow operations.
-
----
-
-# 15. Wide compare and select
-
-Wide compares are non-destructive:
-
-```text
-CMPEQ   rd, ra, rb
-CMPNE   rd, ra, rb
-CMPLT   rd, ra, rb
-CMPLTU  rd, ra, rb
-CMPLE   rd, ra, rb
-CMPLEU  rd, ra, rb
-```
-
-Every result is zero or `0xFFFFFFFF`.
-
-The base ISA includes full four-register select:
-
-```text
-SEL rd, rt, rf, rc
-```
-
-Semantics:
-
-```c
-rd = (rc != 0) ? rt : rf;
-```
-
-The compact `CMOV` remains useful when one alternative already occupies the destination.
-
----
-
-# 16. Bitfield and bit-manipulation operations
-
-Full bitfield instructions are mandatory wide operations:
-
-```text
-BFEXTU rd, rs, pos, len
-BFEXTS rd, rs, pos, len
-BFINS  rd, ra, rb, pos, len
-```
-
-`pos` is `0..31`. `len` is `1..32`.
-
-Conceptually:
-
-```c
-BFEXTU: rd = (rs >> pos) & mask(len);
-BFEXTS: rd = sign_extend((rs >> pos) & mask(len), len);
-BFINS:  rd = (ra & ~(mask(len) << pos)) |
-             ((rb & mask(len)) << pos);
-```
-
-A field extending past bit 31 is illegal.
-
-Single-bit operations are also architectural:
-
-```text
-BSET   rd, rs, rb
-BCLR   rd, rs, rb
-BINV   rd, rs, rb
-BEXT   rd, rs, rb
-
-BSETI  rd, rs, bit
-BCLRI  rd, rs, bit
-BINVI  rd, rs, bit
-BEXTI  rd, rs, bit
-```
-
-Required helpers include:
-
-```text
-CLZ
-CTZ
-CPOP
-NOT
-SEXT.B
-SEXT.H
-ZEXT.B
-ZEXT.H
-REV8
+LDPC.W r8, .target_pointer
+JALR   r14, r8
 ```
 
 ---
 
-# 17. Wide immediate arithmetic and constants
+# 20. Indirect control flow
 
-Required wide immediate operations include:
-
-```text
-ADDI rd, ra, imm16
-ANDI rd, ra, imm16
-ORI  rd, ra, imm16
-XORI rd, ra, imm16
-```
-
-Arithmetic immediates are sign extended. Logical immediates are zero extended.
-
-Constant formation includes:
-
-```text
-MOVI rd, simm20
-LUI  rd, uimm20
-```
-
-Conceptually:
-
-```c
-MOVI: rd = sign_extend_20(simm20);
-LUI:  rd = uimm20 << 12;
-```
-
----
-
-# 18. Address generation
-
-## 18.1 General `LEA`
-
-The wide base includes:
-
-```text
-LEA rd, [rb + ri*scale + disp]
-```
-
-where:
-
-```text
-scale = 1, 2, 4, or 8
-```
-
-Conceptually:
-
-```c
-rd = rb + ri * scale + sign_extend(disp);
-```
-
-`ri = r0` means no index.
-
-### No architectural `SH1ADD`, `SH2ADD`, or `SH3ADD`
-
-SIA does **not** allocate separate opcodes for shift-and-add instructions because both major uses are already covered:
+Required compact register control includes:
 
 ```asm
-LWX rd, [base + index*4 + disp]   ; scaled memory access
-LEA rd, [base + index*4 + disp]   ; scaled address generation
-```
-
-Assemblers may accept convenient aliases:
-
-```text
-SH1ADD rd, ri, rb  == LEA rd, [rb + ri*2]
-SH2ADD rd, ri, rb  == LEA rd, [rb + ri*4]
-SH3ADD rd, ri, rb  == LEA rd, [rb + ri*8]
-```
-
-These aliases consume no architectural opcode space.
-
-## 18.2 PC-relative address
-
-```text
-ADR rd, target
-```
-
-`ADR` forms a PC-relative address using a wide signed displacement.
-
-## 18.3 PC-relative literal load
-
-```text
-LDLIT.W rd, target
-```
-
-This provides a single-instruction path for constants and addresses held in nearby literal pools.
-
----
-
-# 19. Generalized wide memory addressing
-
-Wide indexed memory instructions support:
-
-- byte, halfword, and word accesses;
-- signed and unsigned byte/halfword loads;
-- loads and stores;
-- register index scales x1, x2, x4, x8;
-- signed byte displacement;
-- optional base update.
-
-Syntax:
-
-```text
-LBX   rd, [rb + ri*scale + disp], update
-LBUX  rd, [rb + ri*scale + disp], update
-LHX   rd, [rb + ri*scale + disp], update
-LHUX  rd, [rb + ri*scale + disp], update
-LWX   rd, [rb + ri*scale + disp], update
-
-SBX   rs, [rb + ri*scale + disp], update
-SHX   rs, [rb + ri*scale + disp], update
-SWX   rs, [rb + ri*scale + disp], update
-```
-
-`ri = r0` means no index.
-
-Update modes include:
-
-```text
-none
-post-increment base by access size
-post-decrement base by access size
-pre-increment base by access size
-pre-decrement base by access size
-```
-
-For an updating load, destination equal to base is illegal.
-
-The displacement is always a byte displacement; the scale applies only to the register index.
-
----
-
-# 20. Multi-register load/store
-
-SIA exploits its fixed set of 16 architectural registers by using a 16-bit register mask in a wide instruction.
-
-The base ISA includes:
-
-```text
-LDM [rb],  {reglist}
-LDM [rb]+, {reglist}
-
-STM [rb],  {reglist}
-STM -[rb], {reglist}
-```
-
-The initial base does not require every possible ARM-style increment/decrement-before/after combination. The selected forms cover the principal use cases:
-
-- no-update block transfer;
-- forward block load with post-increment;
-- stack save with pre-decrement.
-
-A future encoding may add symmetric `STM [rb]+` or `LDM -[rb]` if profiling demonstrates value.
-
-## 20.1 Register-list ordering
-
-The register list is a 16-bit mask, one bit per architectural register.
-
-Selected registers are transferred in increasing register-number order to increasing memory addresses:
-
-```text
-lowest-numbered selected register  -> lowest address
-...
-highest-numbered selected register -> highest address
-```
-
-The register list must not be empty.
-
-## 20.2 Writeback
-
-For `LDM [rb]+,{list}`:
-
-```c
-EA = rb;
-transfer selected registers;
-rb = rb + 4 * popcount(list);
-```
-
-For `STM -[rb],{list}`:
-
-```c
-rb = rb - 4 * popcount(list);
-EA = rb;
-transfer selected registers;
-```
-
-When writeback is enabled, the base register may not appear in the register list.
-
-Examples:
-
-```asm
-STM -[sp], {r9-r12,r14,r15}
-...
-LDM [sp]+, {r9-r12,r14,r15}
-RET
-```
-
-## 20.3 Exceptions and memory type
-
-A register-list transfer spans at most 64 bytes.
-
-For ordinary memory, implementations must provide precise architectural exceptions. Software must not observe a partially completed architectural register update when a synchronous translation or protection fault is reported.
-
-`LDM` and `STM` are not permitted for device/MMIO memory mappings. Device memory uses scalar accesses so that externally visible side effects remain explicit and restartable.
-
-The privileged/memory architecture will define the exact mechanism by which ordinary and device memory are distinguished.
-
----
-
-# 21. Control flow
-
-The wide base includes direct compare-and-branch operations:
-
-```text
-BEQ   ra, rb, target
-BNE   ra, rb, target
-BLT   ra, rb, target
-BGE   ra, rb, target
-BLTU  ra, rb, target
-BGEU  ra, rb, target
-```
-
-These exist for control-flow-only comparisons where materializing a Boolean mask would be wasteful.
-
-A counted-loop instruction is also included as a candidate base operation:
-
-```text
-DBNZ rs, target
-```
-
-Semantics:
-
-```c
-rs = rs - 1;
-if (rs != 0)
-    pc = target;
-```
-
-Long direct control flow uses:
-
-```text
-B.W  target
-BL.W target
-```
-
-Indirect control flow uses:
-
-```text
-JALR rd, rb, imm16
-```
-
-Conceptually:
-
-```c
-target = (rb + sign_extend_16(imm16)) & ~1u;
-rd = next_pc;
-pc = target;
+JALR rd, rb
 ```
 
 Aliases:
 
 ```text
-JR    rb   == JALR r0,  rb, 0
-CALLR rb   == JALR r14, rb, 0
-RET        == JALR r0,  r14, 0
+JR    rb   == JALR r0,  rb
+CALLR rb   == JALR r14, rb
+RET        == JALR r0,  r14
 ```
+
+There is no mandatory immediate displacement in `JALR`. If address adjustment is needed, software performs it explicitly before the transfer.
+
+---
+
+# 21. Bit manipulation
+
+The base should retain operations that are inexpensive in hardware and difficult or verbose to synthesize.
+
+Strong candidates include:
+
+```text
+CLZ
+CTZ
+CPOP
+REV8
+BSET
+BCLR
+BINV
+BEXT
+```
+
+Immediate single-bit operations are attractive because a register plus a 5-bit bit number fits comfortably in a 16-bit instruction.
+
+Full immediate bitfield extract/insert operations from v0.3 are removed from the mandatory base.
+
+The reason is encoding pressure: even a destructive bitfield operation needs roughly 4 register bits + 5 position bits + 5 length bits before opcode selection.
+
+Uncommon fields should be synthesized with shifts, masks, and logical operations unless later profiling justifies a specialized extension.
 
 ---
 
 # 22. Optional integer multiply/divide extensions
 
-Hardware multiply and divide are **not mandatory in `SIA32-I`**.
+Hardware multiply and divide are not mandatory in `SIA32-I`.
 
-The base ISA reserves standard extension encodings and names so software can target well-defined implementation profiles.
+The base reserves standard extension encodings and names.
 
 ## 22.1 `SIA-Zmul`
 
-The multiply-only extension contains:
+The multiply-only extension should include:
 
 ```text
 MUL
@@ -971,15 +774,13 @@ MULHSU
 MULO
 ```
 
-`MUL` returns the low 32 bits.
+Compact forms may be destructive two-register operations unless profiling justifies allocating a scarce three-register encoding for `MUL`.
 
-`MULH`, `MULHU`, and `MULHSU` return the high 32 bits of signed×signed, unsigned×unsigned, and signed×unsigned products.
-
-`MULO` traps on signed multiplication overflow.
+There are no hidden HI/LO result registers.
 
 ## 22.2 `SIA-M`
 
-The full multiply/divide extension includes all `SIA-Zmul` instructions plus:
+The full multiply/divide extension includes all `SIA-Zmul` operations plus:
 
 ```text
 DIV
@@ -990,23 +791,41 @@ REMU
 
 `SIA-M` implies `SIA-Zmul`.
 
-Implementations may support neither extension, `SIA-Zmul` alone, or full `SIA-M`.
-
 Unsupported extension instructions raise the normal illegal-instruction exception and may be emulated by privileged software where appropriate.
 
-The exact divide-by-zero and signed-overflow result/trap policy remains to be frozen before v1.0.
-
-There are no special HI/LO result registers.
+The exact divide-by-zero and signed-overflow policy remains to be frozen before v1.0.
 
 ---
 
-# 23. Extension model
+# 23. System operations
+
+The base requires compact forms for at least:
+
+```text
+TRAP
+BREAK
+NOP
+```
+
+A later privileged architecture will define:
+
+- user/supervisor state;
+- MMU and TLB behavior;
+- page permissions;
+- fast kernel-call/return conventions;
+- interrupt delivery;
+- atomic operations and the memory model;
+- virtualization support.
+
+The integer ISA intentionally does not encode kernel objects, capability objects, process types, or device abstractions into ordinary instructions.
+
+---
+
+# 24. Extension model
 
 `SIA32-I` is the mandatory integer architecture.
 
-Standard optional extensions use stable names and capability discovery.
-
-Initial extension structure:
+Initial optional extension structure:
 
 ```text
 SIA32-I        mandatory integer architecture
@@ -1022,58 +841,59 @@ Future separately specified extensions may include:
 - virtualization;
 - specialized cryptography.
 
-Media/DSP/vector families are intentionally outside this integer specification.
+Optional extensions should preferentially use reserved 16-bit subspaces where practical. The primary `EXT` region is retained for future cases where a larger instruction format is genuinely justified.
 
 ---
 
-# 24. Architectural instruction summary
+# 25. Architectural instruction summary
 
-## 24.1 Mandatory short/common-path facilities
+## 25.1 Mandatory common-path facilities
 
 ```text
-ADD
-SUB
+ADD three-register
+SUB and destructive arithmetic
 ADDI
 ADDO / SUBO
-AND / OR / XOR / NOT
+AND / OR / XOR with possible source-negation modifiers
 SHL / SHR / SAR
 MIN / MINU / MAX / MAXU
 CMPEQ / CMPLT / CMPLTU
 CMOV
-CLZ / CTZ / CPOP
+explicit ADC / SBB
+CLZ / CTZ / CPOP candidates
 LI
 scalar byte/halfword/word load/store
-short update load/store
-short indexed/scaled word load candidates
-short branches/call/return
+post-increment / pre-decrement word load/store
+scaled indexed word load/store
+LDP / STP
+LD4 / ST4
+LDPC.W
+BNZ / DBNZ
+B / BL
+JALR / JR / CALLR / RET
+TRAP / BREAK / NOP
 ```
 
-## 24.2 Mandatory wide facilities
+## 25.2 Intentionally synthesized facilities
+
+The following are not required as single base instructions:
 
 ```text
-non-destructive three-register ALU
-ANDN / ORN / XNOR
-ROL / ROR
-ADC / SBB with explicit carry/borrow register
-full three-register compares
 full four-register SEL
-BFEXTU / BFEXTS / BFINS
-single-bit set/clear/invert/extract
-wide immediate ALU and constant formation
-LEA with base + scaled index + displacement
-ADR
-LDLIT.W
-general scaled/indexed loads and stores
-pre/post base update
-LDM / STM register-mask transfers
+non-destructive three-register AND/OR/XOR/SUB/etc.
+large immediate arithmetic/logical operations
+general LEA with base + scaled index + displacement
+unrestricted byte-indexed memory operations
 direct compare-and-branch
 long branch/call
 JALR with displacement
-SEXT / ZEXT helpers
-REV8
+full immediate bitfield extract/insert
+arbitrary register-mask LDM/STM
 ```
 
-## 24.3 Optional facilities
+These operations are normally expressed as two or more 16-bit instructions, literal-pool references, or linker veneers.
+
+## 25.3 Optional facilities
 
 ```text
 SIA-Zmul:
@@ -1084,124 +904,148 @@ SIA-M:
     DIV / DIVU / REM / REMU
 ```
 
-`SH1ADD`, `SH2ADD`, and `SH3ADD` are not architectural instructions; they are optional assembler aliases for scaled `LEA` forms.
+---
+
+# 26. Why pair/quad transfers replace register masks
+
+The previous v0.3 architecture used a 16-bit register mask in a 32-bit `LDM/STM` instruction.
+
+v0.4 instead uses bounded `LDP/STP/LD4/ST4` transfers.
+
+Advantages:
+
+- every base instruction remains 16 bits;
+- two-register save/restore is denser than a 32-bit mask instruction;
+- four-register transfer has the same four-byte code size as two pair operations and often matches the old mask form for common prologues;
+- hardware knows each operation performs exactly two or four memory transfers;
+- exception and restart behavior are simpler;
+- ECL implementations can expose internal memory parallelism more easily;
+- small implementations can serialize the fixed number of transfers;
+- instruction fetch and decode remain fixed-width.
+
+The cost is that arbitrary sparse register sets may need multiple instructions. This is accepted in exchange for simpler hardware and architecture.
 
 ---
 
-# 25. Design influences retained
+# 27. Why v0.4 removes mandatory 32-bit instructions
 
-## 25.1 SuperH
+The v0.3 mixed-width design required every implementation to support:
 
-SIA retains several useful density ideas:
+- instruction-length detection;
+- second-halfword fetch;
+- wide instruction packing;
+- wide instruction restart rules;
+- possible cache-line and page-boundary crossing;
+- more complicated branch-target and predecode behavior.
+
+As the 16-bit base became richer through update addressing, scaled array accesses, conditional move, multiple-register pair/quad transfers, PC-relative literal loads, and counted loops, fewer operations justified that complexity.
+
+In many cases a rich 32-bit operation can be replaced by two 16-bit instructions with identical static code size.
+
+v0.4 therefore makes fixed-width simplicity the default and leaves one primary opcode region reserved for a future extension mechanism if real workloads later justify longer instructions.
+
+---
+
+# 28. Design influences retained
+
+## 28.1 SuperH
+
+SIA retains:
 
 - native 16-bit common-path instructions;
 - PC-relative literal loading;
-- PC-relative address formation;
 - post-increment and pre-decrement addressing;
 - compact loop/control operations.
 
-SIA does not adopt SuperH's global T condition bit or branch delay slots.
+SIA does not adopt delay slots or a global condition bit.
 
-## 25.2 Alpha
+## 28.2 Alpha
 
-Useful ideas include:
+Useful ideas retained include:
 
 - zero register;
-- conditional data movement without ordinary arithmetic flags;
-- explicit memory ordering in a later memory-model specification;
-- high-word integer results as ordinary registers rather than hidden accumulator state.
+- conditional data movement without arithmetic flags;
+- ordinary-register integer results instead of hidden accumulator state.
 
-## 25.3 RISC-V
+## 28.3 ARM / AArch64
 
-Useful ideas include:
+SIA retains the value of multiple-register memory operations but chooses bounded pair and four-register transfers rather than arbitrary register masks.
 
-- clean standard-extension naming and profiles;
+This combines old ARM's prologue/epilogue density goal with the bounded implementation complexity of AArch64-style pair transfers.
+
+## 28.4 MRISC32 / M88k
+
+SIA adopts two lessons:
+
+- PC-relative operations deserve explicit code-density attention;
+- source-negation modifiers can increase the usefulness of Boolean logic encodings at little hardware cost.
+
+SIA does not currently replace shifts with full bitfield operations because the 16-bit encoding cannot afford unrestricted register, position, and length fields efficiently.
+
+## 28.5 RISC-V
+
+Useful ideas retained include:
+
+- named optional extension profiles;
 - optional multiply/divide with a multiply-only subset;
-- high-value bit manipulation such as `ANDN`, `ORN`, `XNOR`, CLZ/CTZ/CPOP, min/max, rotates, and single-bit operations;
-- simple halfword-aligned mixed-width instruction fetch.
+- high-value bit manipulation;
+- no hidden multiply result state.
 
-SIA does not need architectural `SH1ADD`/`SH2ADD`/`SH3ADD` because generalized scaled memory addressing and `LEA` already provide the same address-generation capability.
-
-## 25.4 MIPS
-
-Useful ideas include:
-
-- bitfield extract/insert;
-- sign/zero extension helpers;
-- simple upper-immediate constant construction;
-- conventional explicit integer operations.
-
-SIA does not adopt HI/LO multiply state, delay slots, or compressed-ISA mode switching.
-
-## 25.5 PA-RISC
-
-Useful ideas include:
-
-- strong bitfield operations;
-- rich but explicit address generation;
-- direct compare-and-branch where materializing a comparison result is unnecessary.
-
-SIA does not currently adopt instruction nullification.
-
-## 25.6 ARM register-list transfer
-
-SIA adopts the useful core of ARM-style multiple-register transfer but simplifies it:
-
-- exactly one architectural 16-bit register mask;
-- canonical register ordering;
-- only the most useful no-update/post-increment/pre-decrement forms initially;
-- no base-register-in-list writeback ambiguity;
-- no device-memory use.
-
-The 16-register SIA model makes this instruction especially encoding-efficient.
+SIA differs fundamentally by making every base instruction 16 bits rather than using a 32-bit base with compressed forms.
 
 ---
 
-# 26. Open decisions before v1.0
+# 29. Open decisions before v1.0
 
 The largest remaining questions are:
 
-1. Whether all four expensive short three-register primary regions are justified after real code-density measurements.
-2. Whether both short `LDX.W` and `LDA.W` survive now that wide generalized memory addressing is mandatory.
-3. Whether `DBNZ` receives a dedicated 16-bit encoding in addition to its wide form.
-4. Whether `BNEZ` deserves a separate compact encoding.
-5. Exact displacement widths for wide generalized memory and `LEA`.
-6. Whether symmetric `STM [rb]+` and `LDM -[rb]` belong in the base multi-transfer set.
-7. Exact precise-fault microarchitectural requirements for `LDM/STM`, especially across page boundaries.
-8. Whether `ZAP`/`ZAPNOT`-style byte-mask instructions add enough value beyond bitfields and masks.
-9. Whether `REV16` or full bit-reverse operations belong in the integer base.
-10. Divide-by-zero and signed-division-overflow semantics for `SIA-M`.
-11. Exact opcode numbers and relocation encodings.
-12. Whether every short instruction should have a semantically identical canonical wide form, simplifying decoding/tooling at the cost of some wide opcode space.
+1. Exact primary opcode assignments after code-density experiments.
+2. Whether `SUB` deserves a scarce three-register form in addition to destructive `SUB`.
+3. Whether `MUL` deserves a three-register encoding in `SIA-Zmul`.
+4. Exact source-negation modifier encoding for Boolean logic.
+5. Whether immediate shifts belong in the base and their exact encoding.
+6. Whether `BZ` receives a compact form alongside `BNZ`.
+7. Exact displacement width and scaling for `LDPC.W`.
+8. Whether PC-relative address formation (`ADR`/`ADDPC`) deserves a direct 16-bit form.
+9. Whether `SH2ADD` deserves a scarce three-register slot for explicit 32-bit address generation.
+10. Whether scalar `[base+4]` or `[base+8]` forms are useful enough to keep once `LDP/LD4` exist.
+11. Exact mode allocation for pair/quad transfers.
+12. Whether pair/quad byte or halfword forms are ever justified; the default answer is no.
+13. Exact compact branch displacement widths.
+14. Which destination-zero escape encodings should provide `CLZ`, `CTZ`, `CPOP`, `REV8`, or other unary operations.
+15. Whether full bitfield operations should remain entirely outside the base or receive a later standard extension.
+16. Divide-by-zero and signed-division-overflow semantics for `SIA-M`.
+17. Exact atomics required by the later multiprocessing architecture.
+18. The exact future semantics, if any, of the reserved `EXT` primary region.
 
 The architecture should be frozen only after an assembler, emulator, compiler backend, and representative code-density benchmark suite exist.
 
 ---
 
-# 27. Current design position
+# 30. Current design position
 
-SIA32-I v0.3 makes the following architectural commitments:
+SIA32-I v0.4 makes the following architectural commitments:
 
 - **16 architectural integer registers.**
-- **16-bit and 32-bit instructions are both mandatory.**
-- **No ISA mode switch.**
-- **The first halfword determines instruction length.**
-- **Wide instructions may cross virtual-page boundaries with precise restart semantics.**
+- **32-bit integer and address model.**
+- **Every base instruction is exactly 16 bits.**
+- **No mandatory 32-bit instruction form.**
+- **One primary opcode region is reserved for future extension-length mechanisms.**
 - **No arithmetic flags register.**
-- **Comparisons produce full-register masks.**
-- **Short `CMOV` and wide full `SEL` are architectural.**
-- **Checked arithmetic uses `ADDO`/`SUBO`.**
-- **Carry and borrow use explicit GPR mask state through `ADC`/`SBB`.**
-- **Bitfield extract/insert is mandatory.**
-- **Scaled/indexed loads and stores are mandatory.**
-- **Pre/post base update is architectural.**
-- **General scaled address generation is architectural through `LEA`.**
-- **`SH1ADD`/`SH2ADD`/`SH3ADD` are aliases, not architectural opcodes.**
-- **Multi-register `LDM/STM` is architectural.**
-- **PC-relative address and literal formation are architectural.**
-- **Multiply/divide is optional through standard extensions.**
+- **Comparisons produce full-register Boolean masks.**
+- **`CMOV` is architectural; full four-register `SEL` is synthesized.**
+- **Destructive two-register ALU forms are preferred to wide three-register forms.**
+- **Explicit carry and borrow use a GPR Boolean mask through `ADC`/`SBB`.**
+- **Scaled indexed 32-bit load and store are architectural.**
+- **Post-increment and pre-decrement scalar word addressing are architectural.**
+- **`LDP/STP` and `LD4/ST4` replace arbitrary register-mask `LDM/STM`.**
+- **PC-relative literal loading is architectural.**
+- **`DBNZ` is architectural.**
+- **Large immediates and far control flow use literal pools and linker veneers.**
+- **Full immediate bitfield extract/insert is not mandatory in the base.**
+- **Multiply/divide remains optional through standard extensions.**
 - **No hidden HI/LO multiply state.**
 - **No delay slots.**
 - **No media/SIMD family is defined in the integer base.**
 
-SIA is therefore a **density-first mixed-width RISC**: the 16-bit encoding is the common path, while the mandatory 32-bit form provides the full expressive instruction set without forcing complex operations into cramped short encodings.
+SIA is therefore a **fixed-16-bit, 32-bit-data RISC architecture** optimized around dense memory access, conditional execution, fast function entry/exit, pointer walking, array indexing, and simple implementation across very small CPUs through high-performance ECL systems.
