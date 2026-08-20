@@ -1,0 +1,8 @@
+[package]
+name = "siaemu"
+version = "0.1.0"
+edition = "2021"
+description = "Reference interpreter for the experimental SIA32-I v0.4 fixed-16-bit ISA"
+license = "MIT"
+
+[dependencies]
