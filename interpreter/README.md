@@ -1,6 +1,6 @@
 # SIA reference interpreter
 
-`SIA32-I` v0.4 deliberately leaves the numeric instruction encoding provisional. `siaemu` is a small, dependency-free Rust interpreter that gives the current fixed-16-bit design an executable **prototype encoding** so that the ISA can be tested before v1.0 is frozen.
+`SIA32-I` v0.4 deliberately leaves much of the numeric instruction encoding provisional. `siaemu` is a small, dependency-free Rust interpreter that gives the current fixed-16-bit design an executable **prototype encoding** so that the ISA can be tested before v1.0 is frozen.
 
 It intentionally implements the v0.4 design in `../SIA.md`; it does not add packed/SIMD or other later brainstorming.
 
@@ -40,9 +40,9 @@ These services are emulator conventions, not architectural SIA I/O requirements.
 
 ## Prototype encoding
 
-The high nibble follows the provisional v0.4 primary map:
+The high nibble follows the v0.4 primary map. Most assignments are still subject to measurement, but the `ADC`, `SBB`, and `EXT` primary values are now committed by the architecture draft.
 
-| Primary | Prototype use |
+| Primary | Use |
 |---|---|
 | `0` | `ADD rd,ra,rb`; `rd=0` escape encodes `CLZ` |
 | `1` | `CMOV rd,rs,rc`; `rd=0` escape encodes `CTZ` |
@@ -57,15 +57,20 @@ The high nibble follows the provisional v0.4 primary map:
 | `A` | `BNZ` / `DBNZ` |
 | `B` | `B` / `BL` |
 | `C` | indirect control, bit operations, optional multiply/divide, `REV8`, system |
-| `D` | **prototype `ADC rd,rs,rc`** |
-| `E` | **prototype `SBB rd,rs,rc`** |
+| `D` | `ADC rd,rs,rc` |
+| `E` | `SBB rd,rs,rc` |
 | `F` | reserved `EXT`; executing it faults |
 
-### Important encoding experiment: `ADC` / `SBB`
+### `ADC` / `SBB`
 
-The v0.4 semantic specification requires explicit three-register `ADC` and `SBB`, but the provisional primary map does not yet assign them a legal 16-bit encoding. A three-register operation consumes all twelve payload bits, so each operation needs a full primary opcode unless its semantics change.
+`ADC` and `SBB` are mandatory unrestricted three-register base instructions. A three-register operation consumes all twelve payload bits, so each receives a complete primary opcode:
 
-The interpreter therefore temporarily assigns primaries `D` and `E` to `ADC` and `SBB`. The spec currently calls these regions “reserved base growth.” This is intentional: the emulator is exposing an unresolved encoding-pressure decision rather than silently changing the architecture. Do not treat these two assignments as v1.0-frozen.
+```text
+D rd rs rc    ADC rd,rs,rc
+E rd rs rc    SBB rd,rs,rc
+```
+
+`rc` is the explicit carry/borrow input and output as a SIA Boolean mask (`0` or `0xFFFFFFFF`). These assignments are no longer merely interpreter experiments.
 
 ### Arithmetic group (`4 rd rs fn`)
 
