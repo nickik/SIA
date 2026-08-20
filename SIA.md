@@ -8,7 +8,7 @@ The first architecture defined here is the integer-only `SIA32-I` base. It has 1
 
 The central design objective is a **32-bit machine with a dense 16-bit instruction stream**. Common operations are encoded directly. Less common rich operations may require two or more 16-bit instructions rather than introducing a second mandatory instruction length.
 
-Numeric opcode assignments remain provisional until assembler, emulator, compiler, and code-density experiments are available.
+Most numeric opcode assignments remain provisional until assembler, emulator, compiler, and code-density experiments are available. The dedicated primary assignments for `ADC`, `SBB`, and the reserved `EXT` prefix are now architectural commitments of this draft.
 
 ---
 
@@ -209,7 +209,7 @@ The base architecture does not include partial-word unaligned load/store instruc
 
 # 7. Provisional primary opcode map
 
-The following map is provisional and is intended to demonstrate that the required base fits comfortably in a fixed 16-bit encoding.
+The following map is provisional except for the committed `ADC`, `SBB`, and `EXT` primary assignments. It demonstrates that the required base fits in a fixed 16-bit encoding.
 
 ```text
 15:12     use
@@ -227,18 +227,14 @@ The following map is provisional and is intended to demonstrate that the require
 1010      conditional / counted branch group
 1011      direct branch / call group
 1100      misc / system / standard extension group
-1101      reserved base growth
-1110      reserved base growth
+1101      ADC three-register
+1110      SBB three-register
 1111      reserved future EXT prefix
 ```
 
-This leaves three complete primary regions unavailable to ordinary v0.4 allocation:
+All ordinary primary opcode values `0000` through `1110` are therefore allocated. This does **not** mean the 16-bit base encoding is exhausted: the grouped primary regions still contain unused subfunction and mode encodings. `1111` remains permanently reserved as the future `EXT` mechanism.
 
-- `1101` — reserved 16-bit base growth;
-- `1110` — reserved 16-bit base growth;
-- `1111` — future extension prefix.
-
-Thus 18.75% of the primary encoding space remains completely reserved before counting unused subfunctions within allocated groups.
+The dedicated `ADC` and `SBB` primaries are intentional. Explicit carry/borrow is considered sufficiently important for multi-precision arithmetic, software floating point, emulation, and cryptographic/bignum workloads to justify two scarce unrestricted three-register primary slots.
 
 ---
 
@@ -292,6 +288,10 @@ store_u32(rb + (ri << 2), rs);
 ```
 
 The base does not require an unrestricted byte-indexed three-register load/store. Unscaled byte offsets can be synthesized with `ADD` followed by a scalar load/store when necessary.
+
+## 8.5 Carry and borrow
+
+`ADC rd, rs, rc` and `SBB rd, rs, rc` are also unrestricted three-register instructions. They use dedicated primary opcodes `1101` and `1110` respectively. Their arithmetic semantics are defined in section 12.
 
 ---
 
@@ -406,7 +406,16 @@ false / no carry / no borrow = 0x00000000
 true  / carry    / borrow    = 0xFFFFFFFF
 ```
 
-The compact forms are destructive:
+`ADC` and `SBB` are mandatory unrestricted three-register base instructions with dedicated primary encodings:
+
+```text
+15:12  11:8  7:4  3:0
+-----  ----  ---  ---
+1101    rd    rs    rc      ADC
+1110    rd    rs    rc      SBB
+```
+
+The forms are destructive in `rd`:
 
 ```asm
 ADC rd, rs, rc
@@ -443,6 +452,8 @@ ADC  r2, r4, r7
 ```
 
 Result is `r2:r1`, with final carry in `r7`.
+
+These two dedicated primary opcodes are an intentional exception to the general preference for destructive two-register arithmetic. Multi-word arithmetic is sufficiently common in emulation, software floating point, large-integer code, and compatibility runtimes that expanding each limb into several instructions would impose a recurring dynamic cost.
 
 ---
 
@@ -859,7 +870,7 @@ SHL / SHR / SAR
 MIN / MINU / MAX / MAXU
 CMPEQ / CMPLT / CMPLTU
 CMOV
-explicit ADC / SBB
+ADC / SBB three-register
 CLZ / CTZ / CPOP candidates
 LI
 scalar byte/halfword/word load/store
@@ -999,7 +1010,7 @@ SIA differs fundamentally by making every base instruction 16 bits rather than u
 
 The largest remaining questions are:
 
-1. Exact primary opcode assignments after code-density experiments.
+1. Exact assignments within the still-provisional primary groups after code-density experiments; `ADC=1101`, `SBB=1110`, and `EXT=1111` are committed.
 2. Whether `SUB` deserves a scarce three-register form in addition to destructive `SUB`.
 3. Whether `MUL` deserves a three-register encoding in `SIA-Zmul`.
 4. Exact source-negation modifier encoding for Boolean logic.
@@ -1035,6 +1046,7 @@ SIA32-I v0.4 makes the following architectural commitments:
 - **Comparisons produce full-register Boolean masks.**
 - **`CMOV` is architectural; full four-register `SEL` is synthesized.**
 - **Destructive two-register ALU forms are preferred to wide three-register forms.**
+- **`ADC rd,rs,rc` and `SBB rd,rs,rc` are mandatory unrestricted three-register instructions using primary opcodes `1101` and `1110`.**
 - **Explicit carry and borrow use a GPR Boolean mask through `ADC`/`SBB`.**
 - **Scaled indexed 32-bit load and store are architectural.**
 - **Post-increment and pre-decrement scalar word addressing are architectural.**
