@@ -31,7 +31,7 @@ impl Cpu {
         if image.len() > u32::MAX as usize {
             return Err("binary is too large for the 32-bit SIA address space".into());
         }
-        let memory_size = memory_size.max(image.len()).max(4);
+        let memory_size = memory_size.max(image.len()).max(16);
         if memory_size > u32::MAX as usize {
             return Err("memory size exceeds the 32-bit SIA address space".into());
         }
@@ -40,7 +40,8 @@ impl Cpu {
         memory[..image.len()].copy_from_slice(image);
 
         let mut regs = [0u32; 16];
-        regs[SP] = (memory_size as u32) & !3;
+        // The standard ABI requires a 16-byte-aligned call-boundary stack.
+        regs[SP] = (memory_size as u32) & !15;
 
         Ok(Self {
             regs,
@@ -128,9 +129,6 @@ impl Cpu {
             0xA => self.exec_cond_branch(insn, next_pc),
             0xB => self.exec_direct_branch(insn, next_pc),
             0xC => return self.exec_misc(insn, next_pc),
-            // Prototype encoding only: v0.4 leaves these primaries reserved, but
-            // ADC/SBB need three unrestricted register fields and therefore need
-            // whole primary slots in a 16-bit encoding.
             0xD => self.exec_adc(insn),
             0xE => self.exec_sbb(insn),
             0xF => Err("reserved EXT prefix executed".into()),
@@ -262,6 +260,12 @@ impl Cpu {
     }
 
     fn exec_scalar_memory(&mut self, insn: u16) -> Result<(), String> {
+        // Modes 8..B (mode[3:2] == 10) are the v0.5 implicit-SP
+        // subformat. Bits normally used for rb become S + immediate bits.
+        if (insn & 0xC) == 0x8 {
+            return self.exec_stack_memory(insn);
+        }
+
         let rv = nibble(insn, 8);
         let rb = nibble(insn, 4);
         let mode = (insn & 0xF) as u8;
@@ -319,9 +323,33 @@ impl Cpu {
                 self.write_reg(rb, addr);
                 self.store_u32(addr, value)?;
             }
-            _ => return Err(format!("reserved scalar-memory mode {mode:#x}")),
+            _ => unreachable!("stack-relative modes handled above"),
         }
         Ok(())
+    }
+
+    fn exec_stack_memory(&mut self, insn: u16) -> Result<(), String> {
+        let rv = nibble(insn, 8);
+        let store = ((insn >> 7) & 1) != 0;
+        let imm5 = (((insn >> 4) & 0x7) << 2) | (insn & 0x3);
+
+        if !store && rv == 0 {
+            // LWSP r0 is architecturally reclaimed as ADJSP simm5*16.
+            let simm5 = sign_extend(imm5 as u32, 5);
+            let delta = (simm5 as u32).wrapping_mul(16);
+            self.write_reg(SP, self.read_reg(SP).wrapping_add(delta));
+            return Ok(());
+        }
+
+        let offset = (imm5 as u32) * 4;
+        let addr = self.read_reg(SP).wrapping_add(offset);
+        if store {
+            self.store_u32(addr, self.read_reg(rv))
+        } else {
+            let value = self.load_u32(addr)?;
+            self.write_reg(rv, value);
+            Ok(())
+        }
     }
 
     fn exec_multi_memory(&mut self, insn: u16) -> Result<(), String> {
@@ -415,8 +443,8 @@ impl Cpu {
     fn exec_ldpc(&mut self, insn: u16, pc: u32) -> Result<(), String> {
         let rd = nibble(insn, 8);
         let disp = sign_extend((insn & 0xFF) as u32, 8);
-        // Prototype choice: use a word-aligned PC+4 base. v0.4 leaves the
-        // exact PC-relative base rule open for measurement.
+        // Prototype choice: use a word-aligned PC+4 base. The exact
+        // architectural PC-relative base remains open for measurement.
         let base = pc.wrapping_add(4) & !3;
         let addr = base.wrapping_add((disp as u32).wrapping_mul(4));
         let value = self.load_u32(addr)?;
@@ -540,14 +568,13 @@ impl Cpu {
     fn exec_system(&mut self, imm8: u8) -> Result<Option<Stop>, String> {
         match imm8 {
             0xFE => Err("BREAK instruction executed".into()),
-            0xFF => Ok(None), // NOP
+            0xFF => Ok(None),
             trap => self.exec_trap(trap),
         }
     }
 
     fn exec_trap(&mut self, trap: u8) -> Result<Option<Stop>, String> {
         match trap {
-            // Emulator-only semihosting. These are not SIA hardware I/O definitions.
             0 => Ok(Some(Stop::Exit(self.read_reg(1)))),
             1 => {
                 let fd = self.read_reg(1);
@@ -742,12 +769,7 @@ impl Cpu {
                 (insn >> 7) & 0xf,
                 sign_extend((insn & 0x7f) as u32, 7)
             ),
-            0x7 => format!(
-                "MEM r{},r{},mode={:x}",
-                nibble(insn, 8),
-                nibble(insn, 4),
-                insn & 0xf
-            ),
+            0x7 => self.disassemble_scalar_memory(insn),
             0x8 => format!(
                 "MULTI r{},r{},mode={:x}",
                 nibble(insn, 8),
@@ -795,6 +817,31 @@ impl Cpu {
             0xF => "EXT(reserved)".into(),
             _ => unreachable!(),
         }
+    }
+
+    fn disassemble_scalar_memory(&self, insn: u16) -> String {
+        if (insn & 0xC) == 0x8 {
+            let rv = nibble(insn, 8);
+            let store = ((insn >> 7) & 1) != 0;
+            let imm5 = (((insn >> 4) & 0x7) << 2) | (insn & 0x3);
+            if !store && rv == 0 {
+                let simm5 = sign_extend(imm5 as u32, 5);
+                return format!("ADJSP {}", simm5 * 16);
+            }
+            return format!(
+                "{} r{},{}",
+                if store { "SWSP" } else { "LWSP" },
+                rv,
+                imm5 * 4
+            );
+        }
+
+        format!(
+            "MEM r{},r{},mode={:x}",
+            nibble(insn, 8),
+            nibble(insn, 4),
+            insn & 0xf
+        )
     }
 }
 
@@ -875,7 +922,7 @@ fn usage() -> String {
     "usage: siaemu <program.bin> [--memory BYTES] [--max-steps N] [--trace]\n\n\
      The raw binary is loaded at address 0 and execution starts at PC=0.\n\
      Execution stops when PC reaches the end of the image or TRAP 0 exits.\n\
-     r13 (sp) starts at the top of RAM. Default RAM: 1 MiB."
+     r13 (sp) starts 16-byte aligned at the top of RAM. Default RAM: 1 MiB."
         .into()
 }
 
@@ -939,6 +986,34 @@ mod tests {
         (rd << 8) | (ra << 4) | rb
     }
 
+    fn stack_mem(reg: u16, imm5: u16, store: bool) -> u16 {
+        assert!(reg < 16);
+        assert!(imm5 < 32);
+        0x7000
+            | (reg << 8)
+            | ((store as u16) << 7)
+            | (((imm5 >> 2) & 0x7) << 4)
+            | 0x8
+            | (imm5 & 0x3)
+    }
+
+    fn lwsp(reg: u16, byte_offset: u16) -> u16 {
+        assert_eq!(byte_offset % 4, 0);
+        stack_mem(reg, byte_offset / 4, false)
+    }
+
+    fn swsp(reg: u16, byte_offset: u16) -> u16 {
+        assert_eq!(byte_offset % 4, 0);
+        stack_mem(reg, byte_offset / 4, true)
+    }
+
+    fn adjsp(byte_delta: i16) -> u16 {
+        assert_eq!(byte_delta % 16, 0);
+        let units = byte_delta / 16;
+        assert!((-16..=15).contains(&units));
+        stack_mem(0, (units as u16) & 0x1f, false)
+    }
+
     #[test]
     fn li_and_add() {
         let image = words(&[li(1, 40), li(2, 2), add(3, 1, 2)]);
@@ -950,13 +1025,12 @@ mod tests {
 
     #[test]
     fn post_increment_store_and_load() {
-        // r1=64; r2=42; SW r2,[r1]+; r1-=4; LW r3,[r1]+
         let image = words(&[
             li(1, 63),
-            0x6881, // ADDI r1,+1 => 64
+            0x6881,
             li(2, 42),
             0x7000 | (2 << 8) | (1 << 4) | 0xD,
-            0x6800 | (1 << 7) | 0x7C, // ADDI r1,-4
+            0x6800 | (1 << 7) | 0x7C,
             0x7000 | (3 << 8) | (1 << 4) | 0xC,
         ]);
         let mut cpu = Cpu::new(&image, 1024, false, 100).unwrap();
@@ -966,13 +1040,37 @@ mod tests {
     }
 
     #[test]
+    fn stack_relative_spill_reload_and_adjust() {
+        let image = words(&[
+            adjsp(-64),
+            li(4, 42),
+            swsp(4, 20),
+            li(4, 0),
+            lwsp(4, 20),
+            adjsp(64),
+        ]);
+        let mut cpu = Cpu::new(&image, 1024, false, 100).unwrap();
+        assert_eq!(cpu.read_reg(SP), 1024);
+        cpu.run().unwrap();
+        assert_eq!(cpu.read_reg(4), 42);
+        assert_eq!(cpu.read_reg(SP), 1024);
+    }
+
+    #[test]
+    fn swsp_r0_stores_zero() {
+        let image = words(&[adjsp(-32), li(4, 17), swsp(4, 0), swsp(0, 0), lwsp(5, 0)]);
+        let mut cpu = Cpu::new(&image, 1024, false, 100).unwrap();
+        cpu.run().unwrap();
+        assert_eq!(cpu.read_reg(5), 0);
+    }
+
+    #[test]
     fn dbnz_loops() {
-        // r1=3, r2=0; loop: ADDI r2,1; DBNZ r1,loop
         let image = words(&[
             li(1, 3),
             li(2, 0),
             0x6800 | (2 << 7) | 1,
-            0xA800 | (1 << 7) | 0x7E, // DBNZ r1, -2 halfwords
+            0xA800 | (1 << 7) | 0x7E,
         ]);
         let mut cpu = Cpu::new(&image, 1024, false, 100).unwrap();
         cpu.run().unwrap();
@@ -984,12 +1082,12 @@ mod tests {
     fn pair_store_and_load() {
         let image = words(&[
             li(1, 63),
-            0x6881, // r1 = 64
+            0x6881,
             li(4, 11),
             li(5, 22),
-            0x8000 | (4 << 8) | (1 << 4) | 0x3, // STP r4:r5,[r1]+
-            0x6800 | (1 << 7) | 0x78,           // ADDI r1,-8
-            0x8000 | (6 << 8) | (1 << 4) | 0x1, // LDP r6:r7,[r1]+
+            0x8000 | (4 << 8) | (1 << 4) | 0x3,
+            0x6800 | (1 << 7) | 0x78,
+            0x8000 | (6 << 8) | (1 << 4) | 0x1,
         ]);
         let mut cpu = Cpu::new(&image, 1024, false, 100).unwrap();
         cpu.run().unwrap();
