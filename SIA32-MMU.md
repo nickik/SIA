@@ -5,280 +5,204 @@
 - Target: `SIA32-I + SIA32-P`
 - Purpose: normative MMU semantics for protected SIA systems
 - Primary design goal: **very low-cost address-space switching for IPC and scheduling**
-- Design influence: later DEC Alpha ASN/ASM context behavior
+- Design influence: later DEC Alpha ASN/global-translation behavior
 - First required platform: Lighting / Cosmic
+- Status: **normative MMU direction for SIA32 v1**
 
-This document refines the virtual-memory portion of `SIA32-P` into a dedicated MMU contract.
+This document is the authoritative SIA32 MMU specification. It supersedes the older 4 KiB / two-level / 8-bit-ASID MMU details that remain in early drafts of `SIA32-P.md`.
 
-The most important design rule is:
+The central rule is:
 
 > **Changing address spaces must not normally require flushing translation state.**
 
-Cosmic is expected to use a capability-microkernel design in which an IPC operation may transfer execution directly from a sender in one address space to a receiver in another. The MMU therefore treats address-space switching as a cheap architectural operation rather than as a destructive TLB event.
-
-The model deliberately borrows the useful context semantics of later Alpha processors while retaining SIA's simpler hardware-walked two-level page tables.
+Cosmic is expected to be a capability microkernel in which IPC may transfer execution directly between protection domains. Address-space switching is therefore a cheap context operation, not a destructive TLB event.
 
 ---
 
-# 1. Design goals
+# 1. Architectural summary
+
+```text
+Address space             32-bit
+
+Normal page               2 KiB
+Superpage                 1 MiB
+
+ASID                       12 bits / 4096 values
+
+TLB entry:
+    VPN
+    ASID
+    G
+    page size
+    physical page
+    R/W/X/U
+
+Page tables               3-level
+
+VA:
+    L2       6 bits
+    L1       6 bits
+    L0       9 bits
+    offset  11 bits
+
+L1 leaf                    1 MiB superpage
+L0 leaf                    2 KiB page
+
+VMCTX:
+    root >> 12             20 bits
+    ASID                   12 bits
+
+root alignment             4 KiB
+
+SWRITE VMCTX               never flushes TLB
+```
+
+Recommended mapping policy:
+
+```text
+G=1
+    Cosmic kernel
+    universal ROM libraries
+    universal system stubs
+
+ASID-tagged
+    application code
+    heap
+    stack
+    per-process data
+    private shared-memory mappings
+```
+
+---
+
+# 2. Design goals
 
 The SIA32 MMU shall provide:
 
 - 32-bit virtual addressing;
-- 4 KiB pages;
-- two-level page tables;
+- fine-grained 2 KiB normal pages suitable for memory-constrained systems;
+- 1 MiB superpages for large stable mappings;
 - hardware page-table walking;
 - read/write/execute/user permissions;
-- tagged cached translations;
-- global mappings shared across address spaces;
-- one-instruction address-space context switching;
-- no required TLB flush on ordinary process or IPC switches;
-- selective invalidation when mappings actually change;
+- ASID-tagged cached translations;
+- global translations shared across address spaces;
+- one-register address-space context switching;
+- no TLB flush on ordinary IPC/process switches;
+- selective invalidation only when mappings change;
 - inexpensive ASID recycling;
-- identical semantics in the Rust full-system VM and FPGA implementations.
+- identical architectural behavior in the Rust VM and later FPGA/custom implementations.
 
-The MMU does **not** define:
-
-- processes;
-- threads;
-- IPC objects;
-- capabilities;
-- scheduler policy;
-- page replacement policy;
-- swapping;
-- kernel virtual-address layout.
-
-Those remain Cosmic policy.
+The MMU does not define processes, threads, capabilities, IPC objects, page-replacement policy, swapping, or the user/kernel virtual-address split. Those are Cosmic/ABI policy.
 
 ---
 
-# 2. Alpha-style context principle
+# 3. Unified page/frame model
 
-Later Alpha implementations attached an Address Space Number (ASN) to translation-buffer entries. Mappings marked as address-space independent could remain valid across process switches, while process-specific entries were distinguished by ASN.
+SIA does **not** define separate physical instruction pages and data pages.
 
-SIA adopts the same fundamental principle:
+A physical frame is ordinary memory. Its role is determined by the permissions of the virtual mapping:
 
 ```text
-cached translation key
-    = virtual page + ASID
-
-unless PTE.G = 1
-    = virtual page only
+R W X U G
 ```
 
-Consequently, switching from address space A to B does not invalidate A's translations. They may remain resident and become immediately useful when A runs again.
+Examples:
 
-This is especially valuable for IPC-heavy microkernels.
+```text
+application code         R-X U
+process data             RW- U
+stack                    RW- U
+ROM library              R-X U G
+ROM constants            R-- U G
+Cosmic kernel text       R-X   G
+Cosmic kernel data       RW-   G
+```
+
+An implementation may have separate instruction and data TLBs/caches. That is microarchitecture and does not create different page types.
 
 ---
 
-# 3. Virtual-address format
+# 4. Virtual-address format
 
-SIA32 uses a 32-bit virtual address and 4 KiB pages.
+A SIA32 virtual address is divided as follows:
 
 ```text
-31                    22 21                    12 11             0
-+-----------------------+------------------------+----------------+
-|       L1 index        |       L0 index         | page offset    |
-|       10 bits         |       10 bits          |   12 bits      |
-+-----------------------+------------------------+----------------+
+31          26 25          20 19                 11 10          0
++-------------+--------------+----------------------+-------------+
+| L2  6 bits  | L1  6 bits   | L0      9 bits      | offset 11b  |
++-------------+--------------+----------------------+-------------+
 ```
 
-Each page-table page contains 1024 32-bit entries and occupies exactly 4 KiB.
+Therefore:
 
-The baseline defines only 4 KiB leaf mappings.
+```text
+L2 index     = VA[31:26]      64 entries
+L1 index     = VA[25:20]      64 entries
+L0 index     = VA[19:11]     512 entries
+offset       = VA[10:0]     2048 bytes
+```
+
+A normal page is 2 KiB.
+
+One complete L0 table contains 512 32-bit entries:
+
+```text
+512 * 4 bytes = 2048 bytes
+```
+
+Thus one L0 page table occupies exactly one normal 2 KiB physical frame and maps exactly:
+
+```text
+512 * 2 KiB = 1 MiB
+```
+
+This is intentional.
 
 ---
 
-# 4. MMU context state
+# 5. Page-table levels
 
-The active virtual-memory context consists logically of:
+## 5.1 L2 root
 
-```text
-VMROOT     root page-table physical page number
-ASID       current address-space identifier
-```
+The L2 root contains 64 architecturally used entries.
 
-For fast context switching, SIA32-P additionally exposes the composite system register:
+Only 256 bytes are required for those entries, but the root object is allocated from normal memory and its base must be **4 KiB aligned** so its address can be represented compactly in `VMCTX`.
 
-```text
-VMCTX
-```
+The unused space in the containing allocation is not architecturally interpreted.
 
-## 4.1 `VMCTX` format
+An L2 entry is a non-leaf pointer in the baseline. L2 leaf mappings are reserved for possible future very-large-page support.
 
-```text
-31                    12 11          8 7                    0
-+-----------------------+--------------+----------------------+
-| VMROOT physical PPN   |   reserved   |        ASID          |
-|       20 bits         |    4 bits    |        8 bits        |
-+-----------------------+--------------+----------------------+
-```
+## 5.2 L1 table
 
-The reserved bits must be written as zero and read as zero.
+An L1 table contains 64 architecturally used entries.
 
-Thus:
+An L1 entry may be:
 
-```text
-VMROOT = VMCTX[31:12]
-ASID   = VMCTX[7:0]
-```
+- invalid;
+- a non-leaf pointer to an L0 table;
+- a **1 MiB superpage leaf**.
 
-`VMROOT` and `ASID` remain readable/writable aliases for software that needs to manipulate them individually.
+## 5.3 L0 table
 
-## 4.2 Atomic context installation
+An L0 table contains 512 entries and occupies exactly one 2 KiB frame.
 
-A write to `VMCTX` installs both `VMROOT` and `ASID` as one architectural context change.
-
-Example:
-
-```asm
-SWRITE VMCTX, r4
-```
-
-After the instruction retires:
-
-- all subsequent translated instruction fetches use the new context;
-- all subsequent translated data accesses use the new context;
-- no subsequent access may accidentally use the old `VMROOT` with the new `ASID`, or vice versa;
-- stale prefetched instructions from the previous context must not execute under the new context.
-
-The context write is locally serializing with respect to address translation.
-
-It does **not** imply a global data-memory `FENCE` and does **not** invalidate translation entries.
+A valid L0 leaf maps one 2 KiB page.
 
 ---
 
-# 5. Address Space Identifiers
+# 6. Page-table entry format
 
-The baseline SIA32 ASID width is 8 bits.
-
-```text
-ASID = 0..255
-```
-
-All values are usable. ASID zero has no special hardware meaning.
-
-A cached non-global translation is associated with the ASID that was active when the translation was created.
-
-Conceptually:
+Every PTE is one naturally aligned 32-bit little-endian word.
 
 ```text
-TLB entry:
-    virtual_page
-    physical_page
-    permissions
-    ASID
-    global
+31                                   11 10                  0
++--------------------------------------+---------------------+
+|        physical page number          |        flags        |
+|              21 bits                 |       11 bits       |
++--------------------------------------+---------------------+
 ```
 
-A non-global entry matches only when:
-
-```text
-entry.virtual_page == requested.virtual_page
-AND
-entry.ASID == current.ASID
-```
-
-A global entry ignores ASID.
-
-## 5.1 ASIDs are local translation identities
-
-An ASID identifies translation state, not a process object.
-
-Cosmic may assign ASIDs independently on different CPUs in an SMP implementation.
-
-The same Cosmic address space need not use the same numeric ASID on every CPU.
-
-This keeps ASID allocation and recycling local to each processor and simplifies SMP operation.
-
----
-
-# 6. Global mappings
-
-The PTE `G` bit means that the translation is independent of the current ASID.
-
-A cached global translation matches regardless of `ASID`.
-
-Typical use:
-
-```text
-user mappings       G=0
-Cosmic kernel       G=1
-common fixed pages  G=1 where appropriate
-```
-
-The kernel can therefore remain mapped while switching directly between user address spaces.
-
-SIA does not mandate a specific user/kernel virtual-address split. The Lighting/Cosmic ABI should choose one common kernel region and use identical global mappings in every process address space.
-
-## 6.1 Global mapping invariant
-
-Software must not create conflicting `G=1` mappings for the same virtual page on the same CPU.
-
-A virtual page marked global is expected to resolve identically regardless of current ASID.
-
-Changing a global mapping requires appropriate translation invalidation on every CPU that may cache it.
-
----
-
-# 7. Fast IPC context switch
-
-A typical small-message IPC fast path can be:
-
-```text
-sender executes TRAP
-        |
-        v
-trap enters globally mapped Cosmic kernel
-        |
-        v
-kernel validates endpoint/capabilities
-        |
-        v
-small message transferred in registers
-        |
-        v
-load receiver VMCTX
-        |
-        v
-restore receiver register state
-        |
-        v
-SRET directly into receiver
-```
-
-MMU work in the normal path is only:
-
-```asm
-SWRITE VMCTX, receiver_context
-```
-
-No page-table modification is required.
-
-No `TLBFENCE` is required.
-
-No cache flush is required.
-
-Previously cached sender translations remain cached under the sender ASID.
-
-Previously cached receiver translations may immediately hit after the context switch.
-
-This is the intended SIA/Cosmic IPC model.
-
----
-
-# 8. Page-table entry format
-
-Each PTE is one naturally aligned 32-bit little-endian word.
-
-```text
-31                                      12 11                 0
-+-----------------------------------------+--------------------+
-|             physical PPN                |       flags        |
-|               20 bits                   |      12 bits       |
-+-----------------------------------------+--------------------+
-```
+The physical page number is expressed in 2 KiB units.
 
 Baseline flags:
 
@@ -289,396 +213,558 @@ bit 2   W      writable
 bit 3   X      executable
 bit 4   U      accessible from User mode
 bit 5   G      global / ASID-independent
-bits 6..11    software-reserved
+bits 6..10    software-reserved
 ```
 
-SIA does not require hardware Accessed or Dirty bits in the baseline.
+SIA32 does not require hardware Accessed or Dirty bits in the baseline. Cosmic may use software-reserved bits for mapping metadata.
 
-Cosmic may use software-reserved PTE bits for its own metadata.
+## 6.1 Invalid PTE
+
+```text
+V = 0
+```
+
+The entry is invalid.
+
+## 6.2 Non-leaf PTE
+
+```text
+V = 1
+R = 0
+W = 0
+X = 0
+```
+
+The PPN identifies the physical base of the next-level table.
+
+`U` and `G` are ignored for non-leaf entries in the baseline.
+
+## 6.3 Leaf PTE
+
+```text
+V = 1
+AND
+(R | W | X) != 0
+```
+
+At L0, the leaf maps a 2 KiB frame.
+
+At L1, the leaf maps a 1 MiB superpage.
+
+At L2, leaf PTEs are reserved in the baseline.
+
+## 6.4 Superpage alignment
+
+A 1 MiB L1 leaf must identify a 1 MiB-aligned physical base.
+
+Because PPNs are expressed in 2 KiB units, the low 9 PPN bits of an L1 superpage leaf must be zero.
+
+A malformed/misaligned superpage PTE raises the corresponding page fault.
 
 ---
 
-# 9. Page-table walk
+# 7. Page-table walk
 
-SIA retains the hardware-defined two-level walk already specified by SIA32-P.
-
-Given virtual address `va`:
+For virtual address `va`:
 
 ```text
-l1  = va[31:22]
-l0  = va[21:12]
-off = va[11:0]
+l2  = va[31:26]
+l1  = va[25:20]
+l0  = va[19:11]
+off = va[10:0]
 ```
 
-The root page address is:
+The root physical address is obtained from the active context:
 
 ```text
-root = VMROOT << 12
+root = VMCTX.root << 12
 ```
 
-Level 1:
+## 7.1 L2
 
 ```text
-pte1 = physical_read32(root + l1 * 4)
+pte2 = physical_read32(root + l2 * 4)
 ```
 
-A valid non-leaf PTE supplies the L0 page-table PPN.
+A valid non-leaf supplies the L1-table physical base.
 
-Level 0:
+An invalid or malformed entry faults.
+
+## 7.2 L1
 
 ```text
-pte0 = physical_read32((pte1.PPN << 12) + l0 * 4)
+pte1 = physical_read32(l1_base + l1 * 4)
 ```
 
-A valid leaf produces:
+If `pte1` is a valid leaf, it maps a 1 MiB superpage:
 
 ```text
-pa = (pte0.PPN << 12) | off
+pa = (pte1.PPN << 11) | va[19:0]
 ```
 
-The page-table walker always reads page tables by physical address.
+If `pte1` is a valid non-leaf, it supplies the L0-table base.
 
-TLBs and walk caches are implementation details.
+## 7.3 L0
+
+```text
+pte0 = physical_read32(l0_base + l0 * 4)
+```
+
+A valid leaf maps one 2 KiB frame:
+
+```text
+pa = (pte0.PPN << 11) | off
+```
+
+Page-table walks always use physical addresses. Page-table memory must be normal coherent RAM, not MMIO.
+
+The walk is architectural; TLBs, walk caches, microcode, or dedicated walkers are implementation choices.
 
 ---
 
-# 10. Translation-cache behavior
+# 8. Permissions
 
-An implementation may provide:
+For User-mode access:
+
+```text
+U must be 1
+```
+
+and the access type requires:
+
+```text
+instruction fetch    X
+load                 R
+store                W
+```
+
+Supervisor mode ignores `U` but still obeys `R/W/X` while translation is enabled.
+
+This deliberately supports mappings such as:
+
+```text
+R--
+-W-
+--X
+RW-
+R-X
+RWX
+```
+
+Cosmic is expected normally to enforce W^X policy even though the architecture can represent RWX.
+
+---
+
+# 9. ASID-tagged translations
+
+The SIA32 ASID is **12 bits**:
+
+```text
+ASID = 0..4095
+```
+
+All values are usable. ASID zero has no special architectural meaning.
+
+Every cached non-global translation behaves as if tagged by:
+
+```text
+virtual page
+ASID
+page size
+```
+
+A non-global TLB hit requires the virtual address and current ASID to match.
+
+ASIDs identify translation contexts, not process objects. In SMP systems ASID assignment may be CPU-local.
+
+The 4096-value namespace is intentionally large enough that ordinary IPC/context switching should almost never force immediate ASID recycling.
+
+---
+
+# 10. Global mappings
+
+`G=1` means the mapping is independent of the current ASID.
+
+A cached global translation may be reused across any `VMCTX` change.
+
+Recommended uses include:
+
+```text
+Cosmic kernel                 U=0 G=1
+universal ROM libraries       U=1 G=1
+universal ROM constants       U=1 G=1
+universal IPC/system stubs    U=1 G=1
+```
+
+A global user mapping is fully valid: `G` does not imply supervisor-only access. `U` controls user access independently.
+
+## 10.1 Global mapping invariant
+
+For any virtual address mapped `G=1`, the physical target, page size, and effective permissions must be identical in every address space in which the mapping exists.
+
+Software must never create conflicting global mappings for the same VA.
+
+This permits one TLB translation to remain valid across process switches.
+
+## 10.2 ROM use
+
+Immutable ROM is an especially strong global-mapping use case.
+
+For example:
+
+```text
+system library code       R-X U G
+system constants          R-- U G
+```
+
+Mutable library state remains ASID-private RAM.
+
+---
+
+# 11. VMCTX — combined translation context
+
+Fast address-space switching uses the privileged `VMCTX` register.
+
+```text
+31                    12 11                               0
++-----------------------+----------------------------------+
+| root physical >> 12   |             ASID                 |
+|       20 bits         |            12 bits               |
++-----------------------+----------------------------------+
+```
+
+The root is therefore required to be 4 KiB aligned even though ordinary pages are 2 KiB.
+
+`VMROOT` and `ASID` may remain architectural aliases for management/debug software, but the fast context path should use `VMCTX`.
+
+## 11.1 Context installation
+
+```asm
+SWRITE VMCTX, rN
+```
+
+atomically installs both root and ASID.
+
+After it retires:
+
+- subsequent translated fetches use the new context;
+- subsequent translated data accesses use the new context;
+- no access may observe a mixed old-root/new-ASID state;
+- stale prefetched instructions from the previous virtual context may not execute as though they belonged to the new context.
+
+## 11.2 No implicit TLB invalidation
+
+**`SWRITE VMCTX` never flushes or invalidates TLB entries merely because the address-space context changes.**
+
+Previously cached translations remain resident under their ASIDs.
+
+Global translations remain immediately usable.
+
+This rule is fundamental to SIA microkernel IPC performance.
+
+A `VMCTX` write is a local translation-context serialization point, not a full ordinary-memory barrier.
+
+---
+
+# 12. Translation-cache architecture
+
+An implementation may use:
 
 - no TLB;
 - one unified TLB;
-- separate ITB and DTB structures;
+- separate instruction and data TLBs;
 - multi-level TLBs;
-- page-walk caches.
+- walk caches.
 
-All are architecturally invisible.
+Architecturally, a TLB entry contains or behaves as if it contains:
 
-Any cached non-global translation must be tagged by ASID or behave equivalently.
+```text
+virtual page/tag
+physical page/base
+ASID
+G
+page size (2 KiB or 1 MiB)
+R/W/X/U permissions
+```
 
-Any cached global translation must remain usable across `VMCTX` changes.
-
-An implementation must never require software to flush all translations merely because `VMROOT` or ASID changes to a different valid context.
+The architecture does not require instruction and data pages to be separate merely because an implementation uses separate I-TLB and D-TLB structures.
 
 ---
 
-# 11. Context switching rules
+# 13. Context switching and IPC
 
-## 11.1 Switching to an existing valid ASID
+## 13.1 Existing valid ASID
 
-If the incoming address space retains a valid assigned ASID:
+If the incoming address space already owns a valid ASID:
 
-```text
-SWRITE VMCTX,new
+```asm
+SWRITE VMCTX, receiver_context
 ```
 
 is sufficient.
 
-No `TLBFENCE` is required.
+No `TLBFENCE`, cache flush, or page-table rewrite is required.
 
-## 11.2 Switching between threads in one address space
+## 13.2 Threads in one address space
 
-If two threads use the same `VMROOT` and ASID, no MMU state change is required at all.
+Threads sharing root and ASID require no MMU state change at all.
 
-## 11.3 Fresh ASID assignment
+## 13.3 Fresh ASID
 
-When an address space receives an ASID that has not been used for conflicting cached translations since its last invalidation, it may be installed immediately without a TLB flush.
+Cosmic may assign a fresh ASID instead of invalidating many stale translations after substantial mapping changes.
 
-This permits the operating system to avoid invalidating old translations by allocating a fresh ASID.
+Old entries remain harmless because their old ASID no longer matches.
 
-## 11.4 ASID reuse
+## 13.4 ASID reuse
 
-Before reusing an ASID for a different translation context on the same CPU, software must invalidate old non-global translations for that ASID:
+Before assigning an ASID to a different translation context on a given CPU, software must invalidate old non-global entries for that ASID:
 
 ```asm
 TLBFENCE.ASID rA
 ```
 
-After completion, the ASID may safely be assigned to another address space.
-
-This makes ASID exhaustion a rare maintenance event rather than part of normal context switching.
+Only ASID reuse requires this maintenance step; ordinary process switching does not.
 
 ---
 
-# 12. Mapping changes
+# 14. Mapping changes and translation fences
 
-Changing address spaces and changing mappings are distinct operations.
+Context changes and mapping changes are different operations.
 
-Ordinary context switching does not require invalidation.
-
-Changing a PTE may require invalidation.
-
-## 12.1 Current ASID, one virtual page
-
-After replacing or revoking a mapping for one virtual page in the current ASID:
+## 14.1 One page in current ASID
 
 ```text
 store new PTE
 TLBFENCE.VA address
 ```
 
-The fence orders the PTE store before subsequent affected translation and removes stale cached translation state.
+`TLBFENCE.VA` invalidates locally cached translations for that VA in the current ASID and any locally cached global translation covering that VA.
 
-## 12.2 Many mappings in one ASID
+It orders prior relevant PTE stores before subsequent affected translations.
 
-Software may use:
+## 14.2 One ASID
 
 ```text
 store changed PTEs
 TLBFENCE.ASID asid
 ```
 
-## 12.3 Whole local translation state
+invalidates local non-global translations carrying that ASID.
 
-`TLBFENCE` invalidates all locally cached translations required by the instruction definition.
-
-This should be uncommon.
-
-## 12.4 Fresh-ASID optimization
-
-Instead of invalidating many stale entries, Cosmic may assign the changed address space a fresh ASID and install it with `VMCTX`.
-
-Old translations remain harmless because they carry the previous ASID.
-
-They are reclaimed lazily when that old ASID is eventually recycled.
-
-This is an intentional Alpha-style optimization.
-
----
-
-# 13. Kernel mappings and IPC
-
-For the first Lighting/Cosmic profile, the recommended structure is:
+## 14.3 Entire local translation state
 
 ```text
-+------------------------------+ high VA
-| Cosmic kernel / kernel data  | G=1
-| kernel stacks / core objects | G=1 where appropriate
-+------------------------------+
-|                              |
-| process-specific user space  | G=0, ASID tagged
-|                              |
-+------------------------------+ low VA
+TLBFENCE
 ```
 
-The exact boundary belongs to the SIA ABI / Lighting platform profile.
+invalidates all local cached translations, including global entries, and relevant walk-cache state.
 
-Trap entry therefore does not require changing page tables merely to execute the kernel.
+This should be rare.
 
-During a fast IPC handoff the kernel remains executing from the same global translation while `VMCTX` changes underneath the user portion of the address space.
+## 14.4 Global mapping changes
 
----
+A global mapping change must be invalidated on every CPU that may cache the mapping.
 
-# 14. Supervisor access semantics
-
-Supervisor accesses use the currently installed `VMCTX` when translation is enabled.
-
-Supervisor mode ignores the PTE `U` bit but continues to obey `R`, `W`, and `X` permissions.
-
-The baseline does not add special instructions to address memory through an arbitrary foreign ASID.
-
-A kernel that needs another address space may:
-
-- switch `VMCTX`;
-- map the relevant physical frame into kernel space;
-- use platform/physical-memory mechanisms defined outside the ordinary user MMU.
-
-The fast IPC path does not require arbitrary foreign-address-space loads because short IPC payloads should normally travel in registers.
+On each relevant CPU, `TLBFENCE.VA` is sufficient for a single changed global VA.
 
 ---
 
-# 15. Fault semantics
+# 15. Fast IPC mapping policy
 
-Page faults remain precise.
+The intended Cosmic layout is conceptually:
 
-On a translation or permission fault:
+```text
+G=1
+    Cosmic kernel mappings
+    universal ROM libraries
+    universal system/IPC stubs
+
+ASID-tagged
+    application executable mappings
+    heap
+    stacks
+    writable process globals
+    TLS
+    process-private shared-memory mappings
+```
+
+The architecture does not freeze exact virtual addresses for those regions.
+
+A typical direct IPC handoff is therefore:
+
+```text
+sender user code
+        |
+        | TRAP
+        v
+Cosmic using global kernel translations
+        |
+        | validate endpoint
+        | transfer short message in registers
+        | install receiver VMCTX
+        v
+Cosmic still using the same global kernel translations
+        |
+        | SRET
+        v
+receiver user code
+```
+
+No TLB flush occurs merely because sender and receiver have different address spaces.
+
+---
+
+# 16. Superpage use
+
+The 1 MiB L1 superpage is intended for mappings where TLB reach matters more than fine-grained protection.
+
+Strong candidates include:
+
+- large Cosmic kernel regions;
+- immutable system ROM;
+- universal runtime/library regions;
+- large read-only tables;
+- later large shared-memory mappings where identical permissions are appropriate.
+
+A single global superpage TLB entry can therefore cover 1 MiB of system code shared by every process.
+
+Ordinary application heaps/stacks should normally use 2 KiB pages unless their size and stability justify superpages.
+
+---
+
+# 17. Fault semantics
+
+Translation and permission faults are precise.
+
+On a fault:
 
 ```text
 EPC     = faulting instruction
 BADADDR = faulting virtual address
-CAUSE   = relevant page-fault cause
+CAUSE   = corresponding instruction/load/store page fault
 ```
 
-The architectural operation has not completed.
+The architectural memory operation has not completed.
 
-For multi-register `LDP/STP/LD4/ST4`, the separately defined all-or-nothing semantics apply.
+For `LDP/STP/LD4/ST4`, the separately specified all-or-nothing fault semantics apply.
+
+Malformed page-table entries, including misaligned superpage leaves, raise the corresponding page fault.
 
 ---
 
-# 16. Interaction with `SYNC.I`
+# 18. Interaction with instruction synchronization
 
-Changing `VMCTX` does not by itself synchronize code written through data accesses.
+Changing `VMCTX` does not by itself make newly written instruction bytes visible to instruction fetch.
 
-When software creates or modifies executable instructions, it must use the SIA instruction-stream synchronization rules.
-
-Typical W^X sequence:
+For generated or modified code:
 
 ```text
-write code into RW page
-change PTE to RX
-TLBFENCE.VA page
+write code into writable page
+change permissions/mapping as required
+TLBFENCE.VA
 SYNC.I
 execute
 ```
 
-A mere process context switch does not require `SYNC.I` if executable memory has not been modified.
+A normal process switch does not require `SYNC.I` when executable contents have not changed.
 
 ---
 
-# 17. Interaction with the strong memory model
+# 19. Interaction with the strong memory model
 
-`VMCTX` is a translation-context serialization point, not a general interprocessor memory barrier.
+The mechanisms remain deliberately distinct:
 
-The SIA strong memory model continues to govern ordinary RAM ordering.
+```text
+SWRITE VMCTX      choose address-space context; no TLB flush
+TLBFENCE*         synchronize changed translations/page tables
+FENCE             full ordinary-data ordering point
+SYNC.I            prior code stores -> later local instruction fetches
+```
+
+Page-table memory is ordinary coherent RAM.
 
 `TLBFENCE*` orders prior relevant PTE stores before subsequent affected translations.
 
-`FENCE` remains the full ordinary-memory barrier.
+---
 
-`SYNC.I` remains the data-write to instruction-fetch synchronization operation.
+# 20. DMA relationship
 
-These mechanisms are deliberately separate:
+The CPU MMU protects CPU virtual memory accesses.
 
-```text
-VMCTX write      choose address-space context
-TLBFENCE*        synchronize changed mappings
-FENCE            synchronize ordinary data ordering
-SYNC.I           synchronize generated/modified instructions
-```
+Device DMA authority is separate and belongs to the platform I/O architecture. For Lighting, PLIO protected DMA handles provide that boundary.
+
+The Lighting memory profile is expected to keep normal RAM and PLIO DMA coherent so ordinary drivers do not require explicit data-cache clean/invalidate operations.
 
 ---
 
-# 18. SMP behavior
+# 21. SMP behavior
 
-ASIDs are processor-local translation tags.
+ASIDs may be processor-local translation identities.
 
-A mapping modification must be synchronized on every CPU that may have cached the affected translation.
+A mapping modification must be synchronized on every CPU that may retain the affected translation.
 
-Typical SMP shootdown:
+Typical shootdown:
 
 ```text
 CPU 0:
     store PTE
     local TLBFENCE.VA
-    send IPI to relevant CPUs
+    send IPI
 
 remote CPU:
     TLBFENCE.VA
     acknowledge
 ```
 
-Cosmic may instead use fresh per-CPU ASIDs where that avoids immediate invalidation.
+Global mapping changes require corresponding invalidation on every relevant CPU.
 
-Global mapping changes require invalidation on all relevant CPUs.
-
-SIA32-P does not require hardware broadcast TLB invalidation.
+SIA does not require hardware broadcast TLB invalidation.
 
 ---
 
-# 19. Why retain hardware page-table walking
+# 22. Why this design favors microkernel IPC
 
-Alpha's ASN concept does not require copying Alpha's PALcode-managed translation-buffer refill model.
+The expensive operation in a traditional address-space switch is often not writing a page-table-root register; it is discarding useful translations and rebuilding working sets afterward.
 
-SIA keeps a standardized hardware walk because it gives:
-
-- one page-table format for Cosmic;
-- deterministic Rust VM behavior;
-- simpler FPGA/software agreement;
-- no kernel entry on an ordinary TLB miss;
-- freedom to change TLB organization without changing the OS;
-- low software overhead on small implementations.
-
-The useful Alpha feature for SIA is **translation identity and context retention**, not software refill itself.
-
----
-
-# 20. Expected fast-path cost
-
-For two runnable threads in different address spaces whose translations are already resident, the MMU portion of an IPC context switch should reduce conceptually to:
+SIA avoids that cost through:
 
 ```text
-load receiver VMCTX value
+12-bit ASIDs
++ global mappings
++ retained translations across VMCTX changes
++ large global superpages
++ one-register root+ASID installation
+```
+
+For two processes whose hot translations remain resident, the MMU work of a direct IPC switch is conceptually only:
+
+```text
+load receiver VMCTX
 SWRITE VMCTX
 ```
 
-The architecture requires no:
-
-```text
-full TLB flush
-page-table rewrite
-cache flush
-instruction-cache flush
-page-table walk solely because the context changed
-```
-
-A TLB miss may of course occur later if the receiver's needed translation is not resident.
-
-This is the main performance objective of the MMU design.
+The architecture requires no full TLB flush, cache flush, page-table rewrite, or page walk solely because the protection domain changed.
 
 ---
 
-# 21. Required conformance tests
+# 23. Required first Lighting profile
 
-## ASID retention
-
-- run address space A and populate translation;
-- switch to B and populate translation for same VA with different PA;
-- switch back to A;
-- A must recover its own translation without mandatory flush.
-
-## Global mapping
-
-- install common `G=1` kernel mapping;
-- switch through many ASIDs;
-- mapping remains valid and identical.
-
-## `VMCTX`
-
-- combined root/ASID change is atomic architecturally;
-- no instruction/data access observes mixed context fields;
-- prefetched user instruction from old context cannot execute after context switch.
-
-## ASID reuse
-
-- reuse without required invalidation may expose stale translation and is software error;
-- `TLBFENCE.ASID` makes reuse safe.
-
-## Mapping modification
-
-- stale translation may remain before required fence;
-- `TLBFENCE.VA` makes the changed mapping visible;
-- assigning a fresh ASID makes stale old-ASID entries harmless.
-
-## IPC fast path
-
-- trap from sender;
-- kernel remains executable through global mapping;
-- switch `VMCTX` to receiver;
-- `SRET` executes receiver using receiver address space;
-- no whole-TLB invalidation occurs.
-
----
-
-# 22. First Lighting profile
-
-The first Lighting implementation shall support:
+The first protected Lighting/Cosmic implementation shall support:
 
 ```text
-32-bit virtual addresses
-4 KiB pages
-2-level hardware-walked page tables
-8-bit ASIDs
-ASID-tagged non-global translations
+32-bit VA
+2 KiB pages
+1 MiB L1 superpages
+three-level hardware page-table walk
+12-bit ASIDs
 G global mappings
-VMCTX combined context register
-VMROOT / ASID aliases
+R/W/X/U permissions
+VMCTX root+ASID context register
+SWRITE VMCTX without TLB invalidation
 TLBFENCE
 TLBFENCE.VA
 TLBFENCE.ASID
-R/W/X/U/G permissions
-precise page faults
+precise translation/protection faults
 ```
 
-The Rust full-system VM should implement this behavior before Cosmic IPC optimization work begins.
-
-The FPGA implementation must match the same architectural behavior, but may choose any TLB organization and replacement policy.
+This is the MMU contract to implement first in the Rust full-system VM and later reproduce in FPGA hardware.
