@@ -7,49 +7,25 @@
 - First concrete profile: **Lighting**
 - Status: **initial structure / TODO**
 
-The SIA instruction architecture deliberately does not define a complete computer.
+The SIA ISA deliberately does not define a complete computer.
 
-The **SIA Platform Specification** defines the machine environment that operating systems, firmware, boot loaders, and full-system virtual machines may rely upon regardless of the internal implementation of the CPU.
+The **SIA Platform Specification** defines reset, trap entry address, physical memory, interrupt controller, timer, ROM, MMIO, boot, device discovery, and machine-control behavior.
 
-Conceptually:
-
-```text
-SIA ISA
-    registers
-    instructions
-    privilege
-    MMU
-    memory ordering
-
-        +
-
-SIA Platform
-    reset
-    physical address space
-    RAM / ROM / MMIO
-    timer
-    interrupts
-    platform identification
-    boot contract
-    device discovery
-    power/reset control
-    DMA/coherency environment
-
-        =
-
-bootable SIA computer
-```
-
-The same architectural CPU may therefore appear in different platform profiles:
+The CPU remains deliberately small:
 
 ```text
-Lighting workstation
-Neutron SMP
-small embedded SIA system
-future SIA server
+SIA32-P CPU state
+    STATUS
+    EPC
+    CAUSE
+    BADADDR
+    SCRATCH
+    VMCTX
 ```
 
-A platform profile selects concrete addresses, mandatory devices, limits, and boot behavior without changing the ISA.
+There is no CPU `TVEC`, `IENABLE`, or `IPENDING` register.
+
+Those responsibilities are handled by fixed platform conventions and MMIO devices.
 
 ---
 
@@ -60,71 +36,119 @@ The platform specification should be:
 - small enough to implement faithfully in the Rust full-system VM;
 - concrete enough that Cosmic never depends on emulator-only behavior;
 - stable across hardware revisions;
-- discoverable where variability is useful;
-- fixed where variability would merely complicate boot software;
-- compatible with PLIO/QDX as the normal peripheral architecture;
+- discoverable where variability helps;
+- fixed where variability would only complicate boot/trap code;
+- compatible with PLIO/QDX;
 - suitable for a capability microkernel with user-level drivers;
-- independent of any one firmware implementation;
-- extensible to SMP without burdening the first single-CPU Lighting system.
+- extensible to SMP without complicating first-generation Lighting.
 
-The platform specification should define mechanisms, not require a particular Cosmic policy.
+The platform defines mechanism, not Cosmic scheduling or driver policy.
 
 ---
 
 # 2. Platform profiles
 
-The generic specification defines common rules and discovery structures.
-
-Concrete profiles define mandatory implementations.
-
-Initial profiles should be:
+Initial profiles:
 
 ```text
 SIA-Platform-Base
-    minimum bootable protected SIA machine contract
+    common bootable protected-machine contract
 
 Lighting-1
     first single-CPU workstation profile
 
-Neutron-1                 later
-    coherent SMP server profile
+Neutron-1
+    later coherent SMP profile
 ```
 
-`Lighting-1` is the first profile that must be executable in the Rust VM.
+A profile fixes concrete addresses, source counts, mandatory devices, limits, and boot behavior.
 
 ---
 
-# 3. Reset and initial CPU state
+# 3. Reset and fixed vectors
 
-The platform must define:
+Every platform profile must define two fixed addresses:
 
-- physical reset-vector address;
-- reset-vector alignment;
-- reset privilege state;
-- initial translation state;
-- initial interrupt state;
-- initial stack policy, if any;
-- whether RAM contents are undefined or cleared;
-- warm reset versus cold reset;
-- reset behavior of MMIO devices;
-- reset behavior of PLIO and QDX devices;
-- whether boot begins in ROM directly or through a small fixed reset stub.
+```text
+RESET_VECTOR
+TRAP_VECTOR
+```
 
-The CPU-level reset state remains defined by `SIA32-P`; this document supplies the platform addresses and device behavior.
+Neither is held in a writable CPU register.
+
+## 3.1 `RESET_VECTOR`
+
+On reset:
+
+```text
+mode       = S
+STATUS.IE  = 0
+STATUS.VM  = 0
+PC         = RESET_VECTOR
+```
+
+`RESET_VECTOR` is therefore a physical address.
+
+## 3.2 `TRAP_VECTOR`
+
+Every synchronous exception, `TRAP`, and asynchronous platform interrupt enters at the single fixed `TRAP_VECTOR` defined by the platform profile.
+
+When:
+
+```text
+STATUS.VM = 0
+```
+
+`TRAP_VECTOR` is used as a physical address.
+
+When:
+
+```text
+STATUS.VM = 1
+```
+
+it is used as a virtual address under the current `VMCTX`.
+
+Therefore a protected OS must map the trap entry identically in every active address space, normally:
+
+```text
+U=0
+R=1
+X=1
+G=1
+```
+
+This is a deliberate architectural/platform contract.
+
+A profile should choose `TRAP_VECTOR` so firmware can provide a valid target in physical mode and Cosmic can map the same numerical address globally after translation is enabled.
+
+Typical arrangement:
+
+```text
+physical mode
+    TRAP_VECTOR -> ROM trap/boot stub
+
+protected Cosmic mode
+    TRAP_VECTOR -> globally mapped Cosmic trap entry
+```
+
+The exact `Lighting-1` addresses are still open.
 
 ## TODO
 
-- [ ] Freeze `Lighting-1` reset vector.
+- [ ] Freeze `Lighting-1` `RESET_VECTOR`.
+- [ ] Freeze `Lighting-1` `TRAP_VECTOR`.
+- [ ] Define trap-vector physical-mode backing.
+- [ ] Define required Cosmic global mapping at `TRAP_VECTOR`.
 - [ ] Freeze boot ROM physical base and size.
 - [ ] Define cold-reset device state.
 - [ ] Define warm-reset semantics.
-- [ ] Define firmware handoff after reset.
 
 ---
 
 # 4. Physical address space
 
-The platform must publish a physical memory map containing at minimum:
+The platform publishes a physical memory map containing at minimum:
 
 ```text
 RAM
@@ -133,39 +157,37 @@ system-control MMIO
 interrupt controller
 monotonic timer
 PLIO host/controller aperture
-optional framebuffer / boot console aperture
+optional boot console/framebuffer
 reserved regions
 ```
 
-The map must distinguish normal coherent memory from MMIO.
-
-The map should leave deliberate expansion windows rather than assigning every address in the first profile.
+The map distinguishes coherent normal memory from MMIO.
 
 ## TODO
 
 - [ ] Choose the `Lighting-1` physical address map.
-- [ ] Define maximum directly addressable physical memory for the first profile.
+- [ ] Define maximum physical memory for the first profile.
 - [ ] Reserve ROM region.
-- [ ] Reserve system MMIO region.
+- [ ] Reserve system-MMIO region.
+- [ ] Reserve interrupt-controller region.
+- [ ] Reserve timer region.
 - [ ] Reserve PLIO aperture.
 - [ ] Define holes/reserved ranges.
 - [ ] Define behavior of unmapped physical accesses.
-- [ ] Define whether aliases are permitted.
+- [ ] Decide whether physical aliases are permitted.
 
 ---
 
 # 5. Physical memory attributes
 
-Every physical region belongs to a platform memory class.
-
-Initial classes should be:
+Initial physical memory classes:
 
 ```text
 NORMAL
-    coherent RAM / ROM-like normal memory semantics
+    coherent RAM suitable for page tables and DMA
 
 ROM
-    normal readable/executable memory, not writable by ordinary stores
+    normal readable/executable immutable memory
 
 MMIO
     strongly ordered, non-speculative device memory
@@ -174,261 +196,346 @@ RESERVED
     no architectural target
 ```
 
-`SIA32-MEM` defines the software-visible ordering rules.
-
-The platform defines which physical ranges have which class.
+`SIA32-MEM` defines ordering semantics; the platform assigns classes to ranges.
 
 ## TODO
 
-- [ ] Freeze the memory-region attribute model.
+- [ ] Freeze memory-region attribute model.
 - [ ] Define whether ROM is cacheable as normal memory.
-- [ ] Define whether executable MMIO is always prohibited.
-- [ ] Define page-table eligibility: only NORMAL coherent RAM.
+- [ ] Define executable-MMIO prohibition.
+- [ ] Define page-table eligibility: NORMAL coherent RAM only.
 - [ ] Define DMA-visible memory classes.
 
 ---
 
 # 6. Platform identification and discovery
 
-Software needs a stable way to identify the platform and discover variable properties.
+A minimal read-only **Platform Information Block** should describe variable platform properties without requiring a modern device-tree-style environment.
 
-A minimal read-only **Platform Information Block** should be considered.
-
-Potential fields:
+Candidate fields:
 
 ```text
 signature
-platform architecture version
+platform-specification version
 platform profile ID
 machine/revision ID
-RAM region descriptors
-ROM region descriptors
+RAM descriptors
+ROM descriptors
 CPU count
 clock/timer frequency
 PLIO host location
 interrupt-controller location
 feature bits
-pointer to additional discovery data
-CRC/versioning
+additional-data pointer
+checksum/version
 ```
-
-The first implementation may place this block at a fixed physical/ROM address.
-
-The design should be much smaller than a modern firmware/device-tree environment while still preventing hard-coded configuration from spreading through Cosmic.
 
 ## TODO
 
-- [ ] Decide fixed platform-information address or firmware pointer mechanism.
-- [ ] Define Platform Information Block header.
-- [ ] Define versioning rules.
-- [ ] Define profile ID namespace.
+- [ ] Decide fixed information-block address or firmware pointer mechanism.
+- [ ] Define header/versioning.
+- [ ] Define profile-ID namespace.
 - [ ] Define machine/revision IDs.
-- [ ] Define RAM-region discovery.
-- [ ] Define optional feature discovery.
-- [ ] Decide which devices are fixed by profile versus discovered.
+- [ ] Define RAM discovery.
+- [ ] Define feature discovery.
+- [ ] Decide fixed-profile versus discovered devices.
 
 ---
 
-# 7. Interrupt architecture
+# 7. Platform interrupt architecture
 
-The CPU sees the architectural classes from `SIA32-P`:
+SIA32-P exposes only:
 
 ```text
-SOFTWARE_INTERRUPT
-TIMER_INTERRUPT
-EXTERNAL_INTERRUPT
+STATUS.IE
+CAUSE.INTERRUPT
+single platform interrupt condition
 ```
 
-The platform must define how real interrupt sources become those classes.
-
-For Lighting, ordinary device notifications should flow conceptually as:
+The CPU does **not** contain:
 
 ```text
-QDX / PLIO device
-        |
-        v
+interrupt pending bitmap
+per-source enable bitmap
+interrupt priority state
+interrupt source register
+software-interrupt pending bit
+ timer pending bit
+```
+
+All of that belongs to the platform interrupt controller.
+
+## 7.1 Source flow
+
+For Lighting:
+
+```text
+monotonic timer deadline
+software-generated interrupt
 PLIO Notification
+direct platform device
         |
         v
 Lighting interrupt controller
         |
+        | pending
+        | masking
+        | priority
+        | routing
+        | claim / complete
         v
-SIA EXTERNAL_INTERRUPT
+single CPU platform-interrupt condition
+        |
+        v
+SIA CPU
+        |
+        v
+TRAP_VECTOR
 ```
 
-The interrupt controller should be deliberately small and optimized for claim/complete behavior.
+When the controller has at least one eligible source, it asserts the platform interrupt condition.
+
+If `STATUS.IE=1`, the CPU may take the interrupt and records:
+
+```text
+CAUSE.INTERRUPT = 1
+CAUSE.CODE      = PLATFORM_INTERRUPT
+```
+
+The source ID is **not** copied into `CAUSE`.
+
+Cosmic identifies the source through the controller.
+
+## 7.2 Claim/complete model
+
+The controller should provide a very small MMIO claim/complete interface.
+
+Conceptual registers:
+
+```text
+PENDING        read pending-source bitmap/status
+ENABLE         source enable/mask state
+CLAIM          read highest eligible pending source ID
+COMPLETE       write completed source ID
+THRESHOLD      optional priority threshold
+SOFTINT        software interrupt generation
+```
+
+Exact register organization is not yet frozen.
+
+Normal handler sequence:
+
+```text
+1. CPU traps to fixed TRAP_VECTOR.
+2. STATUS.IE has been cleared by trap entry.
+3. Cosmic saves required trap state.
+4. Read CLAIM.
+5. Dispatch claimed source.
+6. Acknowledge/clear the underlying source as required.
+7. Write COMPLETE.
+8. SRET.
+```
+
+If another eligible source remains, the controller keeps/reasserts the CPU interrupt condition.
+
+## 7.3 Pending while CPU interrupts are disabled
+
+When `STATUS.IE=0`, controller source state is unchanged.
+
+The controller may continue to record new pending events. They are delivered once CPU interrupt acceptance is re-enabled and the sources are eligible.
+
+This makes CPU `IPENDING` unnecessary.
+
+## 7.4 Per-source masking
+
+All source enable/mask state resides in the controller.
+
+This makes CPU `IENABLE` unnecessary.
+
+The CPU only supplies the final global gate:
+
+```text
+STATUS.IE
+```
+
+## 7.5 Timer and software interrupts
+
+The scheduling timer is an interrupt-controller source.
+
+Software interrupts are also controller sources.
+
+For a later SMP machine, IPIs are generated through controller/MMIO facilities and delivered as routed controller sources; they do not require new baseline CPU pending registers.
+
+## 7.6 PLIO Notifications
+
+PLIO device notifications enter the controller either:
+
+- as individually assigned interrupt sources; or
+- through one or more PLIO aggregate sources whose detailed notification is then claimed from the PLIO host.
+
+The exact `Lighting-1` mapping remains to be defined after reviewing the PLIO Notification model.
 
 ## TODO
 
-- [ ] Define interrupt-source namespace.
+- [ ] Define interrupt-source ID width.
 - [ ] Define maximum sources for `Lighting-1`.
-- [ ] Define pending bits.
-- [ ] Define per-source enable/mask.
-- [ ] Define claim/identify operation.
-- [ ] Define complete/acknowledge operation.
-- [ ] Define priority semantics or explicitly specify no programmable priority.
-- [ ] Define tie-breaking between simultaneous sources.
-- [ ] Define spurious-interrupt behavior.
-- [ ] Define level versus edge semantics visible to software.
+- [ ] Define pending representation.
+- [ ] Define enable/mask registers.
+- [ ] Define `CLAIM` semantics.
+- [ ] Define `COMPLETE` semantics.
+- [ ] Decide programmable priorities versus fixed priority.
+- [ ] Define tie breaking.
+- [ ] Define optional threshold/nesting behavior.
+- [ ] Define spurious claim value.
+- [ ] Define edge/level source rules.
+- [ ] Define timer source ID.
+- [ ] Define software-interrupt source ID and generation.
 - [ ] Define PLIO Notification mapping.
-- [ ] Define software-interrupt generation.
-- [ ] Define CPU-side interaction with `IENABLE` / `IPENDING`.
 - [ ] Define reset state.
 - [ ] Freeze MMIO layout.
-- [ ] Implement identical model in Rust VM.
+- [ ] Implement identical Rust VM model.
 
 ---
 
 # 8. Monotonic timer
 
-A protected preemptive OS requires a stable monotonic time source and scheduling deadline mechanism.
+A protected preemptive OS requires a stable monotonic time source and deadline mechanism.
 
-The initial direction is:
+Initial direction:
 
 ```text
 64-bit monotonically increasing counter
-64-bit deadline/compare register
-one-shot timer interrupt
+64-bit deadline/compare
+one-shot deadline source into interrupt controller
 ```
 
-Periodic scheduling should normally be synthesized in software rather than requiring a separate periodic mode.
+There is no CPU timer register and no CPU timer-pending bit.
+
+Periodic behavior is normally synthesized in software.
 
 ## TODO
 
 - [ ] Define counter frequency or discovery mechanism.
-- [ ] Define counter start/reset value.
-- [ ] Define atomic read semantics on a 32-bit CPU.
-- [ ] Define compare/deadline programming.
-- [ ] Define behavior for deadlines already in the past.
-- [ ] Define timer-pending semantics.
-- [ ] Define acknowledgement/rearm behavior.
+- [ ] Define reset/start value.
+- [ ] Define stable 64-bit reads on a 32-bit CPU.
+- [ ] Define deadline programming.
+- [ ] Define past-deadline behavior.
+- [ ] Define timer-source pending behavior.
+- [ ] Define acknowledgement/rearm semantics.
 - [ ] Define wraparound behavior.
-- [ ] Define MMIO register layout.
-- [ ] Define reset state.
-- [ ] Decide whether timer is per-CPU only in SMP profiles.
-- [ ] Keep wall-clock/RTC semantics separate.
+- [ ] Freeze MMIO layout.
+- [ ] Decide per-CPU timer form for later SMP.
+- [ ] Keep wall-clock/RTC separate.
 
 ---
 
 # 9. Boot firmware contract
 
-The platform defines how software gets from reset to an operating-system image without making a specific firmware implementation architectural.
-
-The first Lighting direction is:
+Initial Lighting boot direction:
 
 ```text
-reset
+reset at RESET_VECTOR
   -> system ROM
   -> platform discovery
-  -> initialize RAM / console / PLIO
-  -> discover boot QDX block device
+  -> initialize RAM / interrupt controller / timer / PLIO
+  -> discover QDX boot block device
   -> load Cosmic
+  -> establish global trap/kernel mappings
   -> transfer control to Cosmic
 ```
 
-The boot contract should define what Cosmic may assume at entry.
-
-Possible handoff state:
+Possible Cosmic entry state:
 
 ```text
 mode              Supervisor
-VM                disabled or explicitly documented
-interrupts         disabled
-r1                 pointer to Platform Information Block
-r2                 boot-device identifier/handle
-r3                 optional boot flags
+STATUS.IE         0
+STATUS.VM         explicitly documented
+r1                 Platform Information Block pointer
+r2                 boot-device identity
+r3                 boot flags
 remaining GPRs     unspecified
 ```
 
-This is not yet frozen.
+If Cosmic is entered with `STATUS.VM=1`, the firmware/kernel setup must already ensure that `TRAP_VECTOR` is valid under the installed `VMCTX`.
 
 ## TODO
 
-- [ ] Define firmware entry/reset contract.
+- [ ] Define firmware reset contract.
 - [ ] Define Cosmic kernel entry contract.
-- [ ] Decide VM-on versus VM-off kernel handoff.
+- [ ] Decide VM-on versus VM-off handoff.
 - [ ] Define boot argument registers.
 - [ ] Define boot-device identity.
-- [ ] Define firmware error/recovery behavior.
 - [ ] Define boot image format dependency.
 - [ ] Define ROM/runtime ABI relationship.
-- [ ] Define firmware services, if any, available after OS entry.
-- [ ] Prefer no permanent privileged firmware runtime dependency once Cosmic owns the machine.
+- [ ] Prefer no permanent privileged firmware dependency after Cosmic owns the machine.
 
 ---
 
 # 10. PLIO platform integration
 
-PLIO/QDX remain separately specified peripheral architectures.
-
-The SIA platform profile must define only their machine integration:
+The platform profile defines:
 
 ```text
 PLIO host/controller physical address
 number of initial segments
-interrupt/Notification connection
-DMA relationship to physical memory
+Notification -> interrupt-controller connection
+protected-DMA relationship to RAM
 reset/enumeration behavior
-boot-device discovery requirements
+boot-device requirements
 ```
 
 ## TODO
 
 - [ ] Freeze first PLIO host MMIO base.
-- [ ] Define number of mandatory PLIO segments for `Lighting-1`.
-- [ ] Define host-controller reset state.
+- [ ] Define mandatory segment count.
+- [ ] Define host reset state.
 - [ ] Define enumeration order.
 - [ ] Define Notification -> interrupt-controller mapping.
 - [ ] Define protected-DMA integration.
-- [ ] Define DMA coherency as required by `SIA32-MEM`.
+- [ ] Define coherent-DMA behavior required by `SIA32-MEM`.
 - [ ] Define mandatory QDX boot-block profile.
-- [ ] Define hot-plug behavior later if required.
 
 ---
 
 # 11. Console and early diagnostics
 
-The full machine should be debuggable before the complete QDX software stack exists.
+A minimal boot-console device may be useful before the full QDX stack exists.
 
-A minimal architectural boot-console device may be worthwhile even if normal operation uses PLIO/QDX devices.
-
-Possible first profile:
+Potential first profile:
 
 ```text
-simple MMIO UART-like console
+simple MMIO console
     transmit byte
     receive byte
     status
 ```
 
-It should remain a platform/debug device rather than become part of the SIA ISA.
+It is a platform/debug device, not an ISA facility.
 
 ## TODO
 
-- [ ] Decide whether `Lighting-1` requires a minimal boot UART.
-- [ ] Define MMIO layout if yes.
-- [ ] Define interrupt behavior.
-- [ ] Define whether firmware may use display/keyboard instead.
-- [ ] Define emulator semihosting as explicitly non-architectural debug-only functionality.
+- [ ] Decide whether `Lighting-1` requires a boot console.
+- [ ] Define MMIO layout if present.
+- [ ] Define its interrupt-controller source if interrupt-driven.
+- [ ] Keep emulator semihosting explicitly non-architectural.
 
 ---
 
-# 12. ROM and universal-runtime mapping
+# 12. ROM and universal runtime
 
 The physical platform exposes system ROM.
 
-`SIA-ROM-RUNTIME.md` defines the software strategy for stable universal ROM libraries and shared allocator/runtime code.
+[`SIA-ROM-RUNTIME.md`](SIA-ROM-RUNTIME.md) defines stable global ROM libraries and shared allocator/runtime code.
 
-The platform profile must define:
+The platform defines:
 
-- physical ROM base;
-- physical ROM size;
-- update/revision identity;
+- physical ROM base/size;
+- ROM revision identity;
 - integrity/version metadata;
-- relationship between boot ROM and universal runtime ROM;
-- whether one ROM image contains both or they are separate physical regions.
+- relationship between boot ROM and runtime ROM;
+- physical backing relevant to `RESET_VECTOR` and physical-mode `TRAP_VECTOR`.
 
-Virtual placement of global ROM mappings is a Cosmic/ABI decision, not a physical-platform requirement.
+Virtual global placement of universal ROM libraries remains a Cosmic/ABI decision.
 
 ## TODO
 
@@ -436,7 +543,8 @@ Virtual placement of global ROM mappings is a Cosmic/ABI decision, not a physica
 - [ ] Define ROM header/version identity.
 - [ ] Define integrity/checksum mechanism.
 - [ ] Decide boot-ROM versus runtime-ROM split.
-- [ ] Define expansion/update compatibility rules.
+- [ ] Define physical-mode trap stub arrangement.
+- [ ] Define expansion/update compatibility.
 
 ---
 
@@ -456,23 +564,20 @@ PLIO protected DMA defines device authority; the CPU MMU does not translate devi
 
 ## TODO
 
-- [ ] Freeze exact platform statement of coherent DMA.
-- [ ] Define ordering between DMA completion and interrupt/Notification visibility.
+- [ ] Freeze coherent-DMA statement.
+- [ ] Define ordering between DMA completion and Notification/interrupt visibility.
 - [ ] Define ordering between CPU descriptor stores and device observation.
-- [ ] Define power-loss/durable-storage boundary only in QDX/storage specifications.
 
 ---
 
 # 14. Power and reset control
 
-A real platform needs a minimal machine-control interface.
-
-Potential operations:
+Potential system-control operations:
 
 ```text
 warm reset
 cold reset request
-power-off request where hardware supports it
+power-off request
 machine identification/status
 watchdog later
 ```
@@ -480,96 +585,99 @@ watchdog later
 ## TODO
 
 - [ ] Define system-control MMIO block.
-- [ ] Define reset request semantics.
+- [ ] Define reset-request semantics.
 - [ ] Define power-off semantics.
 - [ ] Decide watchdog support.
-- [ ] Define machine-check/fatal-error reporting later if needed.
 
 ---
 
 # 15. SMP platform extensions — later
 
-The baseline Lighting profile is single-CPU.
-
-A later SMP platform specification must add:
+A later SMP profile adds:
 
 ```text
-CPU count / IDs
+CPU IDs/count
 secondary CPU reset/start
-startup address/mailbox
-IPIs
-per-CPU timer behavior
-per-CPU interrupt routing
-coherent memory contract
-TLB-shootdown support
+startup mailbox/address
+interrupt-controller routing
+software IPIs
+per-CPU timers
+coherent memory
+TLB shootdown protocol
 CPU halt/park/restart
 ```
 
-These should not complicate `Lighting-1`.
+Baseline CPU privileged state remains unchanged.
 
 ## TODO
 
-- [ ] Define as a separate `SIA-SMP-PLATFORM` or `Neutron-1` profile later.
+- [ ] Define as a separate `Neutron-1`/SIA SMP platform profile later.
 
 ---
 
 # 16. Rust full-system VM conformance
 
-The Rust SIA VM becomes the first executable implementation of the Platform Specification.
-
-It must model:
+The Rust full-system VM must model:
 
 ```text
-reset
+RESET_VECTOR
+TRAP_VECTOR
 ROM
 RAM
 physical bus
 system MMIO
-platform-information block
+Platform Information Block
 interrupt controller
-timer
-boot console
+monotonic timer
+boot console if present
 PLIO host
 QDX boot block device
 DMA
 power/reset controls
 ```
 
-No normal Cosmic behavior may depend on host services not represented by an architectural device or firmware interface.
+Required interrupt tests include:
+
+```text
+source becomes pending
+source masked -> no CPU interrupt
+source enabled + STATUS.IE=0 -> remains pending, no trap
+source enabled + STATUS.IE=1 -> CPU traps to TRAP_VECTOR
+CAUSE = PLATFORM_INTERRUPT
+CLAIM returns real source
+COMPLETE retires source
+additional pending source retriggers correctly
+```
 
 ## TODO
 
-- [ ] Add a named `Lighting-1` machine configuration.
-- [ ] Boot from architectural reset vector.
-- [ ] Execute ROM firmware.
-- [ ] Discover platform information.
-- [ ] Generate timer interrupt.
-- [ ] Generate/claim/complete external interrupt.
+- [ ] Add named `Lighting-1` machine configuration.
+- [ ] Boot from `RESET_VECTOR`.
+- [ ] Test synchronous trap to `TRAP_VECTOR` in physical mode.
+- [ ] Test trap to global `TRAP_VECTOR` under VM.
+- [ ] Generate timer source through interrupt controller.
+- [ ] Generate/claim/complete PLIO/device source.
 - [ ] Enumerate PLIO/QDX.
 - [ ] DMA from QDX block device.
-- [ ] Load Cosmic through the architectural boot path.
+- [ ] Load Cosmic through architectural boot path.
 - [ ] Remove semihosting dependencies from normal full-system operation.
 
 ---
 
 # 17. Immediate platform-definition order
 
-The first platform work should proceed in this order:
-
 ```text
 1. Lighting-1 physical memory map
-2. reset vector + ROM layout
+2. RESET_VECTOR + TRAP_VECTOR + ROM layout
 3. Platform Information Block
 4. interrupt controller
 5. monotonic timer
-6. minimal boot console
+6. minimal boot console decision
 7. PLIO host integration
-8. boot firmware handoff
+8. firmware/Cosmic handoff
 9. power/reset control
 10. Rust VM implementation
 ```
-
-The first six items are sufficient to begin serious full-system VM and early Cosmic bring-up before the complete storage and graphics stacks exist.
 
 ---
 
@@ -577,17 +685,17 @@ The first six items are sufficient to begin serious full-system VM and early Cos
 
 The first platform profile is complete when:
 
-- [ ] reset state and reset vector are frozen;
+- [ ] reset state and `RESET_VECTOR` are frozen;
+- [ ] fixed `TRAP_VECTOR` and its physical/global mapping contract are frozen;
 - [ ] physical RAM/ROM/MMIO map is frozen;
 - [ ] memory attributes are frozen;
 - [ ] platform identification/discovery is frozen;
-- [ ] interrupt controller is frozen;
+- [ ] interrupt-controller source/mask/claim/complete contract is frozen;
 - [ ] monotonic timer is frozen;
 - [ ] boot console is frozen or deliberately omitted;
-- [ ] PLIO host integration is frozen;
-- [ ] boot-device discovery is frozen;
-- [ ] Cosmic entry/handoff ABI is frozen;
+- [ ] PLIO integration is frozen;
+- [ ] Cosmic entry ABI is frozen;
 - [ ] DMA/coherency rules are frozen;
 - [ ] power/reset controls are sufficient;
-- [ ] the Rust VM can implement the machine without inventing unspecified platform behavior;
+- [ ] Rust VM can implement the machine without inventing unspecified behavior;
 - [ ] Cosmic can boot entirely through documented platform mechanisms.
