@@ -16,22 +16,24 @@ Work through this list in order unless a later item becomes a direct blocker for
 
 SIA32-I still contains provisional opcode assignments. Before the architecture can become a stable implementation target, the base and privileged instruction encodings need to be frozen.
 
+Current proposal: [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md).
+
 - [ ] Freeze the complete SIA32-I primary opcode map.
-- [ ] Resolve the current `ADC` / `SBB` opcode pressure.
+- [~] Resolve the current `ADC` / `SBB` opcode pressure — current recommendation is primary `0xD` = `ADC`, `0xE` = `SBB`.
 - [ ] Freeze destination-zero escape encodings.
-- [ ] Freeze the `EXT` mechanism.
-- [ ] Allocate encodings for SIA32-P privileged operations:
-  - [ ] `SREAD`
-  - [ ] `SWRITE`
-  - [ ] `SSWAP`
-  - [ ] `SRET`
-  - [ ] `TLBFENCE`
-  - [ ] `TLBFENCE.VA`
-  - [ ] `TLBFENCE.ASID`
-  - [ ] `WFI`
-- [ ] Add `SYNC.I` or equivalent instruction-fetch synchronization operation.
-- [ ] Decide whether `SYNC.I` belongs in SIA32-I or a mandatory system/cache extension.
-- [ ] Freeze illegal/reserved encoding behavior.
+- [~] Freeze the `EXT` mechanism — current recommendation uses primary `0xF` for compact SYSTEM operations and reserves `0xFFxx` as the long-extension escape.
+- [~] Allocate encodings for SIA32-P privileged operations:
+  - [~] `SREAD`
+  - [~] `SWRITE`
+  - [~] `SSWAP`
+  - [~] `SRET`
+  - [~] `TLBFENCE`
+  - [~] `TLBFENCE.VA`
+  - [~] `TLBFENCE.ASID`
+  - [~] `WFI`
+- [~] Add `SYNC.I` instruction-fetch synchronization operation — semantics specified and compact encoding proposed.
+- [x] Decide whether `SYNC.I` belongs in SIA32-I or a mandatory system/cache extension — defined by mandatory Lighting `SIA32-MEM` behavior and encoded in SYSTEM space.
+- [~] Freeze illegal/reserved encoding behavior — proposal now distinguishes User privilege faults from reserved/invalid Supervisor encodings.
 - [ ] Update interpreter/disassembler/assembler tables to use the frozen encoding.
 - [ ] Mark v1.0 instruction encodings as stable and non-redefinable.
 
@@ -39,99 +41,73 @@ SIA32-I still contains provisional opcode assignments. Before the architecture c
 
 # 2. Define precise multi-register exception semantics
 
-`LDP`, `STP`, `LD4`, and `ST4` can touch multiple words and therefore need exact restart/fault behavior.
+Normative semantics: [`SIA32-MULTI-TRANSFER.md`](SIA32-MULTI-TRANSFER.md).
 
-Example problem:
+`LDP`, `STP`, `LD4`, and `ST4` are **all-or-nothing with respect to recoverable architectural faults and interrupts**.
 
-```text
-word 0 succeeds
-word 1 succeeds
-word 2 faults
-```
-
-A microkernel requires predictable restart semantics.
-
-- [ ] Define whether multi-register transfers are architecturally atomic with respect to faults.
-- [ ] Prefer all-or-nothing architectural completion where practical.
-- [ ] Define whether address translation for the entire transfer is validated before any architectural register or memory modification.
-- [ ] Define load destination update behavior on a fault.
-- [ ] Define store visibility on a fault.
-- [ ] Define base-register writeback behavior on a fault.
-- [ ] Define exception PC for a failed multi-register instruction.
-- [ ] Define precise behavior if a transfer crosses a page boundary.
-- [ ] Define behavior for MMIO mappings explicitly; current policy prohibits multi-register transfers to MMIO.
+- [x] Define whether multi-register transfers are architecturally atomic with respect to faults.
+- [x] Define all-or-nothing architectural completion.
+- [x] Define complete-transfer validation before architectural register or memory modification.
+- [x] Define load destination update behavior on a fault.
+- [x] Define store visibility on a fault.
+- [x] Define base-register writeback behavior on a fault.
+- [x] Define exception PC for a failed multi-register instruction.
+- [x] Define precise behavior if a transfer crosses a page boundary.
+- [x] Define behavior for MMIO mappings; multi-register transfers remain prohibited for MMIO.
+- [x] Distinguish fault atomicity from SMP multiword atomicity.
 - [ ] Add conformance tests for all page-boundary and permission combinations.
 
 ---
 
 # 3. Freeze the SIA memory model
 
-SIA should intentionally use a fairly strong, simple memory model, close in programming model to x86 for normal cacheable RAM, while retaining explicit mechanisms where data ordering alone is insufficient.
+Normative model: [`SIA32-MEM.md`](SIA32-MEM.md).
 
-The specification must cover:
+SIA uses a strong **TSO-like** normal-memory model. The only ordinary relaxation is Store -> later Load to a different address. MMIO is stronger and fully ordered.
 
-```text
-normal RAM
-MMIO
-loads vs loads
-loads vs stores
-stores vs stores
-atomics
-DMA visibility
-page-table updates
-instruction fetch
-```
-
-- [ ] Define ordering of ordinary loads relative to older loads.
-- [ ] Define ordering of ordinary loads relative to older stores.
-- [ ] Define ordering of ordinary stores relative to older loads.
-- [ ] Define ordering of ordinary stores relative to older stores.
-- [ ] Define when speculative execution may become architecturally visible.
-- [ ] Define single-copy visibility expectations for ordinary memory.
-- [ ] Define interaction with `SIA32-A` atomics.
-- [ ] Define exact semantics of `FENCE`.
-- [ ] Decide whether the strong baseline model allows `FENCE` to be rare in ordinary code.
-- [ ] Define MMIO ordering separately from normal RAM.
-- [ ] Define whether MMIO accesses are strongly ordered by default.
-- [ ] Define DMA visibility requirements.
-- [ ] Define CPU-to-device publish sequence.
-- [ ] Define device-to-CPU completion/readback sequence.
-- [ ] Define interaction between page-table writes and `TLBFENCE`.
-- [ ] Define interaction between code writes and `SYNC.I`.
-- [ ] Define whether instruction fetch participates in ordinary memory coherence or only through explicit synchronization.
+- [x] Define ordering of ordinary loads relative to older loads.
+- [x] Define ordering of ordinary loads relative to older stores.
+- [x] Define ordering of ordinary stores relative to older loads.
+- [x] Define ordering of ordinary stores relative to older stores.
+- [x] Define when speculative execution may become architecturally visible.
+- [x] Define multi-copy/global visibility expectations for ordinary memory.
+- [x] Define interaction with `SIA32-A` atomics.
+- [x] Define exact semantics of `FENCE`.
+- [x] Define that the strong baseline model makes `FENCE` rare in ordinary code.
+- [x] Define MMIO ordering separately from normal RAM.
+- [x] Define MMIO as strongly ordered and non-speculative.
+- [x] Define DMA visibility requirements for Lighting.
+- [x] Define CPU-to-device publish sequence.
+- [x] Define device-to-CPU completion/readback sequence.
+- [x] Define interaction between page-table writes and `TLBFENCE`.
+- [x] Define interaction between code writes and `SYNC.I`.
+- [x] Define instruction-fetch synchronization separately from ordinary data coherence.
 - [ ] Add litmus tests to the Rust interpreter/VM.
 
 ---
 
 # 4. Define cache-management and instruction synchronization semantics
 
-The architecture does not need to mandate a cache topology, but software-visible cache behavior must be specified.
+Specified in [`SIA32-MEM.md`](SIA32-MEM.md).
 
-- [ ] Define `SYNC.I` semantics:
-  - [ ] prior stores become visible to subsequent local instruction fetches;
-  - [ ] stale prefetch/decode/I-cache state cannot cause old instructions to execute after synchronization;
-  - [ ] operation remains valid on cacheless systems as a legal no-op or pipeline synchronization.
-- [ ] Define SMP expectations for remote instruction synchronization.
-- [ ] Require Cosmic to coordinate cross-CPU code publication when needed.
-- [ ] Define whether explicit data-cache clean/invalidate operations are required by baseline SIA.
-- [ ] Prefer coherent normal RAM if practical so ordinary software does not manage caches.
-- [ ] Define cacheability attributes for MMIO.
-- [ ] Define cacheability attributes for normal RAM.
-- [ ] Define DMA/cache interaction.
-- [ ] Decide whether PLIO DMA is architecturally coherent with CPU caches.
-- [ ] If DMA is not coherent, define exact clean/invalidate operations and ownership transitions.
-- [ ] Define page-table cacheability requirements.
-- [ ] Define self-modifying/JIT code sequence, e.g.:
+The baseline deliberately avoids software-managed data-cache coherence.
 
-```text
-write code
-change mapping if required
-TLBFENCE.VA
-SYNC.I
-execute
-```
-
-- [ ] Document recommended W^X policy for Cosmic.
+- [x] Define `SYNC.I` semantics:
+  - [x] prior stores become visible to subsequent local instruction fetches;
+  - [x] stale prefetch/decode/I-cache state cannot cause old instructions to execute after synchronization;
+  - [x] operation remains valid on cacheless systems as a legal no-op or pipeline synchronization.
+- [x] Define SMP expectations for remote instruction synchronization.
+- [x] Require Cosmic to coordinate cross-CPU code publication when needed.
+- [x] Define whether explicit data-cache clean/invalidate operations are required by baseline SIA — **no** for Lighting.
+- [x] Require coherent normal RAM in the baseline Lighting profile.
+- [x] Define MMIO as non-cacheable from the software-visible point of view.
+- [x] Define normal-RAM cache behavior as transparent/coherent.
+- [x] Define DMA/cache interaction.
+- [x] Define PLIO/Lighting DMA as coherent with CPU caches.
+- [x] Noncoherent DMA cache-maintenance operations are outside the baseline profile.
+- [x] Define page tables as normal coherent physical memory.
+- [x] Define self-modifying/JIT code sequence.
+- [~] Document final recommended W^X policy for Cosmic in the Cosmic specification.
 
 ---
 
@@ -290,16 +266,16 @@ SIA32-I                mostly defined
 SIA32-P                defined
    |
    v
-1. encoding freeze
+1. encoding freeze     proposal written; still needs final freeze
    |
    v
-2. multi-register fault semantics
+2. multi-register      semantics specified
    |
    v
-3. memory model
+3. memory model        SIA-TSO specified
    |
    v
-4. cache + SYNC.I semantics
+4. cache + SYNC.I      baseline specified
    |
    v
 5. Lighting interrupt controller
@@ -330,11 +306,11 @@ For the first protected single-CPU Lighting implementation, SIA is complete enou
 
 - [ ] SIA32-I instruction semantics and encodings are frozen.
 - [ ] SIA32-P is frozen.
-- [ ] multi-register exception/restart behavior is frozen.
-- [ ] memory ordering is frozen.
-- [ ] `FENCE`, `SYNC.I`, and `TLBFENCE` relationships are frozen.
-- [ ] MMIO ordering/cacheability behavior is frozen.
-- [ ] DMA visibility/coherency rules are frozen.
+- [x] multi-register exception/restart behavior is frozen.
+- [x] memory ordering is specified; final v1 freeze follows encoding integration/tests.
+- [~] `FENCE`, `SYNC.I`, and `TLBFENCE` relationships are specified; encodings still need final freeze.
+- [x] MMIO ordering/cacheability behavior is specified.
+- [x] DMA visibility/coherency rules are specified for Lighting.
 - [ ] SIA ABI is frozen.
 - [ ] object/relocation formats are sufficient for Forge.
 - [ ] Lighting timer and interrupt-controller contracts are frozen.
