@@ -5,22 +5,33 @@ SIA is DEC's compact scalable RISC architecture for the Vision 2000 system famil
 ## Specifications
 
 - [`SIA.md`](SIA.md) — base **SIA32-I** integer architecture.
-- [`SIA32-P.md`](SIA32-P.md) — **Privileged Architecture** for protected operating systems, traps, interrupts, and Cosmic.
+- [`SIA32-P.md`](SIA32-P.md) — reconciled **Privileged Architecture**: U/S protection, traps, interrupts, `VMCTX`, `SSWAP`, `SRET`, and `SRETCTX`.
 - [`SIA32-MMU.md`](SIA32-MMU.md) — authoritative fast-context MMU: 2 KiB pages, 1 MiB superpages, 12-bit ASIDs, global mappings, and no TLB flush on ordinary `VMCTX` switches.
-- [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md) — proposed compact, non-conflicting v1 encoding for privileged/system operations.
+- [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md) — compact, non-conflicting v1 encoding proposal including `VMCTX` and `SRETCTX`.
 - [`SIA32-MEM.md`](SIA32-MEM.md) — strong **SIA-TSO** memory model, `FENCE`, MMIO ordering, coherent DMA, caches, and `SYNC.I`.
 - [`SIA32-MULTI-TRANSFER.md`](SIA32-MULTI-TRANSFER.md) — normative all-or-nothing fault/restart semantics for `LDP/STP/LD4/ST4`.
 - [`SIA32-A.md`](SIA32-A.md) — optional **Atomic and Multiprocessing Extension** for coherent shared-memory systems.
 - [`SIA-ROM-RUNTIME.md`](SIA-ROM-RUNTIME.md) — ROM ABI stability, global ROM libraries, and shared arena/slab allocator code with independent kernel/user allocator state.
+- [`SIA-PLATFORM.md`](SIA-PLATFORM.md) — machine/platform contract and TODO for reset, physical memory, interrupts, timer, firmware, PLIO integration, discovery, and the first `Lighting-1` profile.
 - [`TODO.md`](TODO.md) — ordered architecture-completion checklist.
 
-## Extension model
+## Architecture model
 
-The base architecture remains intentionally small. Optional architectural capabilities are documented separately so implementations pay only for features they need.
+The instruction architecture remains intentionally separate from the machine/platform definition.
 
-`SIA32-MEM` defines the baseline software-visible memory behavior used by protected Lighting systems; it does not require a particular cache implementation.
+```text
+SIA32-I
+    base integer ISA
 
-`SIA32-MMU.md` is the authoritative MMU contract and supersedes older draft MMU geometry still present in early `SIA32-P.md` text.
+SIA32-P + SIA32-MMU + SIA32-MEM
+    protected-system CPU architecture
+
+SIA Platform Specification
+    reset + memory map + timer + interrupts + firmware + devices
+
+Lighting-1
+    first concrete workstation platform profile
+```
 
 ```text
 small user/embedded CPU
@@ -33,7 +44,7 @@ coherent multiprocessor
     SIA32-I + SIA32-P + SIA32-MMU + SIA32-MEM + SIA32-A
 ```
 
-The first Lighting/Cosmic implementation requires `SIA32-P`, `SIA32-MMU`, and the `SIA32-MEM` behavior.
+The first Lighting/Cosmic implementation requires the protected-system architecture plus a concrete `Lighting-1` platform profile.
 
 The first required implementation of `SIA32-A` is DEC **Neutron**, targeted as a four-CPU ECL symmetric multiprocessor.
 
