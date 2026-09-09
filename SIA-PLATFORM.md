@@ -111,32 +111,97 @@ Reserve:
 
 # 3. Lighting-1 physical-address strategy
 
-Lighting-1 uses a conventional split:
+Lighting-1 has a full **32-bit physical address architecture**.
+
+The platform follows one simple growth rule:
+
+> **RAM grows upward from physical address zero. Platform and I/O space grows downward from the top of the 32-bit address space.**
+
+The physical address map is frozen as:
 
 ```text
-low addresses             RAM
-
-middle/high addresses     reserved expansion / PLIO
-
-0xFFF00000..              fixed system MMIO
-0xFFFF0000..0xFFFFFFFF    system ROM
+0xFFFFFFFF  +----------------------------------+
+            | SYSTEM ROM                       |
+            | 64 KiB                           |
+            | RESET_VECTOR = 0xFFFF0000         |
+            | TRAP_VECTOR  = 0xFFFFF000         |
+0xFFFF0000  +----------------------------------+
+0xFFFEFFFF  |                                  |
+            | SYSTEM MMIO / EXPANSION          |
+            |                                  |
+            | 0xFFF03000 diagnostics candidate |
+            | 0xFFF02000 system control        |
+            | 0xFFF01000 monotonic timer       |
+0xFFF00000  | 0xFFF00000 interrupt controller  |
+            +----------------------------------+
+0xFFEFFFFF  |                                  |
+            | PLIO0 HOST APERTURE              |
+            | 1 MiB                            |
+0xFFE00000  +----------------------------------+
+0xFFDFFFFF  |                                  |
+            | RESERVED PLATFORM / I/O          |
+            | EXPANSION                        |
+            |                                  |
+0xF0000000  +----------------------------------+
+0xEFFFFFFF  |                                  |
+            | RAM-CAPABLE PHYSICAL SPACE       |
+            |                                  |
+            | RAM grows upward from 0          |
+            |                                  |
+0x00000000  +----------------------------------+
 ```
 
-The first fixed high-address assignments are:
+Normative ranges:
 
 ```text
-0xFFF00000   Lighting interrupt controller
-0xFFF01000   monotonic timer
-0xFFF02000   system control
-0xFFF03000   boot diagnostics/console candidate
-
-0xFFFF0000   64 KiB system ROM
-0xFFFFF000   physical-mode trap entry inside ROM
+0x00000000..0xEFFFFFFF   RAM-capable physical space       3.75 GiB
+0xF0000000..0xFFDFFFFF   reserved platform/I/O expansion  254 MiB
+0xFFE00000..0xFFEFFFFF   PLIO0 host aperture              1 MiB
+0xFFF00000..0xFFFEFFFF   fixed system MMIO + expansion    960 KiB
+0xFFFF0000..0xFFFFFFFF   system ROM                       64 KiB
 ```
 
-Each fixed system device receives a 4 KiB MMIO aperture even if the first implementation uses only a few words.
+This layout deliberately keeps all permanent platform allocations at the high end so later machines can increase installed RAM without moving devices or creating low-memory holes.
 
-## 3.1 One PLIO host in Lighting-1
+## 3.1 Architectural versus initially implemented RAM
+
+SIA/Lighting always uses **32-bit physical addresses**. A small first implementation may implement only a subset of the RAM-capable range.
+
+The expected first hardware direction is a **24-bit RAM implementation**:
+
+```text
+0x00000000..0x00FFFFFF   up to 16 MiB implemented RAM
+0x01000000..0xEFFFFFFF   RAM-capable architecturally,
+                         but unimplemented on that machine
+```
+
+This does **not** make the machine a 24-bit physical-address architecture. The CPU and physical bus still generate full 32-bit addresses so PLIO0, system MMIO, and ROM remain at their architectural high addresses.
+
+Later machines may populate successively larger prefixes of the RAM-capable range without changing the platform map:
+
+```text
+16 MiB
+64 MiB
+256 MiB
+1 GiB
+2 GiB
+...
+up to 0xF0000000 bytes of RAM-capable space
+```
+
+Actual installed RAM is reported through platform discovery/firmware and need not fill the entire architectural RAM-capable range.
+
+## 3.2 Unimplemented and reserved accesses
+
+Physical addresses for which no implemented RAM, ROM, MMIO device, or assigned platform function exists have no architectural target.
+
+An architectural CPU access to such an address raises the appropriate physical `*_ACCESS_FAULT`.
+
+Reserved space is therefore not silently backed by RAM and does not alias another region.
+
+Lighting-1 defines **no architectural physical aliases**.
+
+## 3.3 One PLIO host in Lighting-1
 
 Lighting-1 contains exactly:
 
@@ -146,11 +211,39 @@ Lighting-1 contains exactly:
 1 PLIO segment: PLIO0
 ```
 
-A second PLIO host or segment is **not part of Lighting-1**. Later platform profiles may add additional PLIO hosts without changing the SIA ISA.
+The PLIO0 host aperture is frozen as:
 
-The exact physical aperture for `PLIO0` remains to be frozen as part of the complete Lighting-1 physical map.
+```text
+PLIO0_BASE = 0xFFE00000
+PLIO0_END  = 0xFFEFFFFF
+size       = 1 MiB
+```
 
-## 3.2 Graphics
+A second PLIO host or segment is not part of Lighting-1. Later profiles may allocate additional platform functions from reserved expansion space without changing the SIA ISA.
+
+## 3.4 System MMIO region
+
+Lighting-1 reserves:
+
+```text
+0xFFF00000..0xFFFEFFFF   system MMIO / compatible expansion
+```
+
+Initial assignments are:
+
+```text
+0xFFF00000..0xFFF00FFF   Lighting interrupt controller
+0xFFF01000..0xFFF01FFF   monotonic timer
+0xFFF02000..0xFFF02FFF   system control
+0xFFF03000..0xFFF03FFF   boot diagnostics/console candidate
+0xFFF04000..0xFFFEFFFF   reserved system-MMIO expansion
+```
+
+Each fixed system function receives a 4 KiB aperture even when its first implementation uses only a few words.
+
+Unused addresses inside the system-MMIO expansion range remain reserved until a later compatible profile assigns them.
+
+## 3.5 Graphics
 
 Lighting-1 has **no dedicated graphics or framebuffer physical-address region**.
 
@@ -172,24 +265,29 @@ optional QDX graphics card
 
 Any framebuffer or graphics memory belongs to the graphics device and is exposed through PLIO/QDX mechanisms. The base platform does not reserve a permanent framebuffer window.
 
-## 3.3 ROM/runtime expansion
+## 3.6 ROM/runtime expansion
 
-Lighting-1 reserves only the initial 64 KiB ROM window as a fixed ROM region.
+Lighting-1 reserves only the initial 64 KiB ROM window as fixed ROM:
 
-There is **no separately assigned runtime-ROM expansion window**.
+```text
+0xFFFF0000..0xFFFFFFFF
+```
 
-If later hardware needs more ROM, universal runtime storage, or other fixed-function memory, it is allocated from generic reserved expansion space in a later compatible profile.
+There is no separately assigned runtime-ROM expansion window.
 
-This avoids permanently fragmenting the physical address map around speculative future ROM needs.
+If later hardware needs more ROM, universal runtime storage, or another fixed-function memory range, a later compatible profile allocates it from reserved expansion space.
 
-## Physical-map TODO
+## Physical-map status
 
-- [ ] Freeze maximum directly addressable Lighting-1 RAM.
-- [ ] Freeze exact RAM range.
-- [ ] Freeze `PLIO0` host aperture.
-- [ ] Define generic reserved expansion ranges.
-- [ ] Define behavior of unmapped physical accesses.
-- [ ] Decide whether physical aliases are permitted.
+- [x] Full 32-bit physical address architecture.
+- [x] RAM-capable range frozen: `0x00000000..0xEFFFFFFF`.
+- [x] First implementation may populate only a 24-bit / 16 MiB RAM prefix.
+- [x] Generic platform/I/O expansion frozen: `0xF0000000..0xFFDFFFFF`.
+- [x] PLIO0 aperture frozen: `0xFFE00000..0xFFEFFFFF`.
+- [x] System MMIO region frozen: `0xFFF00000..0xFFFEFFFF`.
+- [x] System ROM frozen: `0xFFFF0000..0xFFFFFFFF`.
+- [x] Unimplemented/reserved accesses raise physical access faults.
+- [x] No architectural physical aliases.
 - [x] No dedicated graphics/framebuffer region.
 - [x] No dedicated runtime-ROM expansion region.
 - [x] Exactly one PLIO host/segment in Lighting-1.
@@ -214,13 +312,24 @@ RESERVED
     no architectural target
 ```
 
-`SIA32-MEM` defines software-visible ordering. The platform defines which physical ranges have each class.
+Lighting-1 assigns the classes as follows:
+
+```text
+implemented RAM within 0x00000000..0xEFFFFFFF   NORMAL
+0xF0000000..0xFFDFFFFF                          RESERVED
+0xFFE00000..0xFFEFFFFF                          MMIO / PLIO host
+assigned 0xFFFxxxxx system apertures             MMIO
+unassigned system-MMIO expansion                 RESERVED
+0xFFFF0000..0xFFFFFFFF                          ROM
+```
+
+`SIA32-MEM` defines software-visible ordering.
 
 ## TODO
 
 - [ ] Freeze whether ROM is cacheable as normal read-only memory.
 - [ ] Define executable-MMIO prohibition.
-- [ ] Require page tables to reside in NORMAL coherent RAM.
+- [x] Require page tables to reside in NORMAL coherent RAM.
 - [ ] Freeze DMA-visible memory classes.
 
 ---
@@ -458,13 +567,14 @@ Lighting-1 requires:
 ```text
 one PLIO host
 one PLIO segment: PLIO0
+PLIO0_BASE = 0xFFE00000
+PLIO0_SIZE = 1 MiB
 INTC source 4 for PLIO0 Notification summary
 coherent protected DMA to NORMAL RAM
 ```
 
 The platform must still define:
 
-- PLIO0 physical MMIO aperture;
 - PLIO0 reset state;
 - slot/device enumeration order;
 - Notification claim/completion interaction with the central `PLIO0` claim;
@@ -633,18 +743,17 @@ None of this changes the six-register SIA32-P privileged-state model.
 
 # 14. Immediate Lighting-1 platform TODO
 
-With vectors and the central interrupt controller frozen, continue in this order:
+With the physical map, fixed vectors, and central interrupt controller frozen, continue in this order:
 
 ```text
-1. freeze RAM range and PLIO0 physical aperture
-2. define monotonic timer
-3. synchronize PLIO Notification claim/completion
-4. define Platform Information Block
-5. define ROM header/runtime organization
-6. decide boot diagnostics console
-7. define firmware -> Cosmic handoff
-8. define power/reset controls
-9. implement Lighting-1 in the Rust full-system VM
+1. define monotonic timer
+2. synchronize PLIO Notification claim/completion
+3. define Platform Information Block
+4. define ROM header/runtime organization
+5. decide boot diagnostics console
+6. define firmware -> Cosmic handoff
+7. define power/reset controls
+8. implement Lighting-1 in the Rust full-system VM
 ```
 
 ---
@@ -656,14 +765,16 @@ Lighting-1 is platform-complete when:
 - [x] `RESET_VECTOR` is frozen;
 - [x] `TRAP_VECTOR` and global trap mapping are frozen;
 - [x] initial system ROM window is frozen;
+- [x] full 32-bit physical address map is frozen;
+- [x] RAM-capable region is frozen;
+- [x] PLIO0 physical aperture is frozen;
+- [x] reserved expansion ranges and access-fault behavior are frozen;
 - [x] central interrupt-controller interface is frozen;
 - [x] PLIO-centric interrupt hierarchy is frozen;
 - [x] exactly one PLIO host/segment is part of Lighting-1;
-- [x] graphics is defined as optional PLIO/QDX hardware rather than base-platform framebuffer space;
+- [x] graphics is optional PLIO/QDX hardware rather than base-platform framebuffer space;
 - [x] no dedicated runtime-ROM expansion region exists;
-- [ ] RAM range and maximum RAM are frozen;
-- [ ] PLIO0 MMIO aperture is frozen;
-- [ ] memory attributes are frozen;
+- [ ] remaining memory-attribute details are frozen;
 - [ ] monotonic timer is frozen;
 - [ ] detailed PLIO Notification claim/completion is synchronized;
 - [ ] platform information/discovery is frozen;
