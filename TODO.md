@@ -1,10 +1,8 @@
 # SIA Architecture Completion TODO
 
-This is the canonical checklist for taking SIA from a compact integer ISA plus initial privilege/atomic extensions to a complete system architecture suitable for Cosmic, the Rust full-system VM, and later FPGA implementation.
+Canonical checklist for taking SIA to a complete protected-system architecture for Cosmic, the Rust full-system VM, and later FPGA/custom implementation.
 
-Work through this list in order unless a later item becomes a direct blocker for implementation or measurement.
-
-## Status convention
+## Status
 
 - `[ ]` not started
 - `[~]` in progress
@@ -12,307 +10,295 @@ Work through this list in order unless a later item becomes a direct blocker for
 
 ---
 
-# 1. Finalize the instruction encoding
+# 1. Finalize instruction encoding
 
-SIA32-I still contains provisional opcode assignments. Before the architecture can become a stable implementation target, the base and privileged instruction encodings need to be frozen.
+Current privileged proposal: [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md).
 
-Current proposal: [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md).
-
-- [ ] Freeze the complete SIA32-I primary opcode map.
-- [~] Resolve the current `ADC` / `SBB` opcode pressure — current recommendation is primary `0xD` = `ADC`, `0xE` = `SBB`.
+- [ ] Freeze complete SIA32-I primary opcode map.
+- [~] Freeze `0xD = ADC`, `0xE = SBB` direction.
 - [ ] Freeze destination-zero escape encodings.
-- [~] Freeze the `EXT` mechanism — current recommendation uses primary `0xF` for compact SYSTEM operations and reserves `0xFFxx` as the long-extension escape.
-- [~] Allocate encodings for SIA32-P privileged operations:
+- [~] Freeze primary `0xF` SYSTEM/EXT mechanism.
+- [~] Freeze privileged/system encodings:
   - [~] `SREAD`
   - [~] `SWRITE`
   - [~] `SSWAP`
   - [~] `SRET`
+  - [~] `SRETCTX`
   - [~] `TLBFENCE`
   - [~] `TLBFENCE.VA`
   - [~] `TLBFENCE.ASID`
   - [~] `WFI`
-- [~] Add `SYNC.I` instruction-fetch synchronization operation — semantics specified and compact encoding proposed.
-- [x] Decide whether `SYNC.I` belongs in SIA32-I or a mandatory system/cache extension — defined by mandatory Lighting `SIA32-MEM` behavior and encoded in SYSTEM space.
-- [~] Freeze illegal/reserved encoding behavior — proposal now distinguishes User privilege faults from reserved/invalid Supervisor encodings.
-- [ ] Update interpreter/disassembler/assembler tables to use the frozen encoding.
-- [ ] Mark v1.0 instruction encodings as stable and non-redefinable.
+  - [~] `SYNC.I`
+  - [~] `FENCE`
+- [x] Reduce baseline privileged system-register namespace to six registers:
+  - [x] `STATUS`
+  - [x] `EPC`
+  - [x] `CAUSE`
+  - [x] `BADADDR`
+  - [x] `SCRATCH`
+  - [x] `VMCTX`
+- [x] Remove `TVEC`, `VMROOT`, `ASID`, `IENABLE`, and `IPENDING` as separate privileged registers.
+- [~] Freeze reserved/illegal encoding behavior.
+- [ ] Update interpreter/disassembler/assembler tables.
+- [ ] Mark v1.0 instruction encodings stable and non-redefinable.
 
 ---
 
-# 2. Define precise multi-register exception semantics
+# 2. Privileged architecture
+
+Normative semantics: [`SIA32-P.md`](SIA32-P.md).
+
+- [x] U/S privilege model.
+- [x] Minimal six-register privileged state.
+- [x] One fixed platform-defined `TRAP_VECTOR`; no writable trap-vector register.
+- [x] One CPU global interrupt gate: `STATUS.IE`.
+- [x] One CPU-level asynchronous cause: `PLATFORM_INTERRUPT`.
+- [x] Interrupt pending/mask/source/priority state moved to platform interrupt controller.
+- [x] `SSWAP sp,SCRATCH` trap-stack transition.
+- [x] `SRET` semantics.
+- [x] `SRETCTX` fast context-switch return semantics.
+- [x] `SRETCTX` does not flush TLB or pre-walk EPC.
+- [ ] Add privileged conformance tests.
+
+---
+
+# 3. MMU
+
+Normative semantics: [`SIA32-MMU.md`](SIA32-MMU.md).
+
+- [x] 32-bit virtual address space.
+- [x] 2 KiB normal pages.
+- [x] 1 MiB superpages.
+- [x] Three-level `6/6/9/11` walk.
+- [x] 12-bit / 4096 ASIDs.
+- [x] `VMCTX = root>>12 + ASID`.
+- [x] `VMCTX` is the only architectural MMU context register.
+- [x] 4 KiB root alignment.
+- [x] Global `G` mappings.
+- [x] Global trap/kernel/ROM mappings supported.
+- [x] `SWRITE VMCTX` never flushes TLB.
+- [x] `TLBFENCE*` mapping-change semantics.
+- [x] Unified physical page/frame model; no instruction/data page types.
+- [ ] Add MMU conformance tests.
+
+---
+
+# 4. Multi-register exception semantics
 
 Normative semantics: [`SIA32-MULTI-TRANSFER.md`](SIA32-MULTI-TRANSFER.md).
 
-`LDP`, `STP`, `LD4`, and `ST4` are **all-or-nothing with respect to recoverable architectural faults and interrupts**.
-
-- [x] Define whether multi-register transfers are architecturally atomic with respect to faults.
-- [x] Define all-or-nothing architectural completion.
-- [x] Define complete-transfer validation before architectural register or memory modification.
-- [x] Define load destination update behavior on a fault.
-- [x] Define store visibility on a fault.
-- [x] Define base-register writeback behavior on a fault.
-- [x] Define exception PC for a failed multi-register instruction.
-- [x] Define precise behavior if a transfer crosses a page boundary.
-- [x] Define behavior for MMIO mappings; multi-register transfers remain prohibited for MMIO.
+- [x] `LDP/STP/LD4/ST4` all-or-nothing for recoverable faults and interrupts.
+- [x] Prevalidate all addresses/translations/permissions before commit.
+- [x] Base writeback only on success.
+- [x] Cross-page semantics.
+- [x] MMIO prohibition.
 - [x] Distinguish fault atomicity from SMP multiword atomicity.
-- [ ] Add conformance tests for all page-boundary and permission combinations.
+- [ ] Add page-boundary/permission conformance tests.
 
 ---
 
-# 3. Freeze the SIA memory model
+# 5. Memory model and caches
 
-Normative model: [`SIA32-MEM.md`](SIA32-MEM.md).
+Normative semantics: [`SIA32-MEM.md`](SIA32-MEM.md).
 
-SIA uses a strong **TSO-like** normal-memory model. The only ordinary relaxation is Store -> later Load to a different address. MMIO is stronger and fully ordered.
-
-- [x] Define ordering of ordinary loads relative to older loads.
-- [x] Define ordering of ordinary loads relative to older stores.
-- [x] Define ordering of ordinary stores relative to older loads.
-- [x] Define ordering of ordinary stores relative to older stores.
-- [x] Define when speculative execution may become architecturally visible.
-- [x] Define multi-copy/global visibility expectations for ordinary memory.
-- [x] Define interaction with `SIA32-A` atomics.
-- [x] Define exact semantics of `FENCE`.
-- [x] Define that the strong baseline model makes `FENCE` rare in ordinary code.
-- [x] Define MMIO ordering separately from normal RAM.
-- [x] Define MMIO as strongly ordered and non-speculative.
-- [x] Define DMA visibility requirements for Lighting.
-- [x] Define CPU-to-device publish sequence.
-- [x] Define device-to-CPU completion/readback sequence.
-- [x] Define interaction between page-table writes and `TLBFENCE`.
-- [x] Define interaction between code writes and `SYNC.I`.
-- [x] Define instruction-fetch synchronization separately from ordinary data coherence.
-- [ ] Add litmus tests to the Rust interpreter/VM.
+- [x] Strong TSO-like normal-memory model.
+- [x] Only ordinary Store -> later Load to different address relaxation.
+- [x] Full `FENCE` semantics.
+- [x] Strongly ordered non-speculative MMIO.
+- [x] Coherent Lighting DMA.
+- [x] No baseline data-cache clean/invalidate instructions.
+- [x] `SYNC.I` semantics.
+- [x] Local and cross-CPU instruction-publication model.
+- [x] Page-table-store / `TLBFENCE` ordering.
+- [ ] Add memory-model litmus tests.
+- [~] Document final Cosmic W^X policy.
 
 ---
 
-# 4. Define cache-management and instruction synchronization semantics
+# 6. SIA Platform Specification
 
-Specified in [`SIA32-MEM.md`](SIA32-MEM.md).
+Platform skeleton: [`SIA-PLATFORM.md`](SIA-PLATFORM.md).
 
-The baseline deliberately avoids software-managed data-cache coherence.
+## 6.1 Fixed vectors and memory map
 
-- [x] Define `SYNC.I` semantics:
-  - [x] prior stores become visible to subsequent local instruction fetches;
-  - [x] stale prefetch/decode/I-cache state cannot cause old instructions to execute after synchronization;
-  - [x] operation remains valid on cacheless systems as a legal no-op or pipeline synchronization.
-- [x] Define SMP expectations for remote instruction synchronization.
-- [x] Require Cosmic to coordinate cross-CPU code publication when needed.
-- [x] Define whether explicit data-cache clean/invalidate operations are required by baseline SIA — **no** for Lighting.
-- [x] Require coherent normal RAM in the baseline Lighting profile.
-- [x] Define MMIO as non-cacheable from the software-visible point of view.
-- [x] Define normal-RAM cache behavior as transparent/coherent.
-- [x] Define DMA/cache interaction.
-- [x] Define PLIO/Lighting DMA as coherent with CPU caches.
-- [x] Noncoherent DMA cache-maintenance operations are outside the baseline profile.
-- [x] Define page tables as normal coherent physical memory.
-- [x] Define self-modifying/JIT code sequence.
-- [~] Document final recommended W^X policy for Cosmic in the Cosmic specification.
+- [ ] Freeze `Lighting-1 RESET_VECTOR`.
+- [ ] Freeze `Lighting-1 TRAP_VECTOR`.
+- [ ] Define physical-mode trap backing/stub.
+- [ ] Define Cosmic `G=1` supervisor trap mapping.
+- [ ] Freeze RAM/ROM/MMIO map.
+- [ ] Freeze memory attributes.
+
+## 6.2 Interrupt controller
+
+The CPU has no `IENABLE`/`IPENDING` registers and no source-specific interrupt state.
+
+- [ ] Define interrupt-source namespace/ID width.
+- [ ] Define maximum sources.
+- [ ] Define pending representation.
+- [ ] Define per-source enable/mask.
+- [ ] Define `CLAIM` operation.
+- [ ] Define `COMPLETE` operation.
+- [ ] Decide fixed/programmed priority model.
+- [ ] Define optional threshold/nesting model.
+- [ ] Define spurious claim value.
+- [ ] Define edge/level behavior.
+- [ ] Define software-interrupt source.
+- [ ] Define timer source.
+- [ ] Define PLIO Notification mapping.
+- [ ] Freeze controller MMIO layout.
+- [ ] Add Rust VM interrupt-controller model.
+
+## 6.3 Monotonic timer
+
+- [ ] Define 64-bit monotonic counter.
+- [ ] Define frequency/discovery.
+- [ ] Define stable 32-bit CPU read sequence.
+- [ ] Define 64-bit deadline/compare.
+- [ ] Define one-shot behavior.
+- [ ] Define past-deadline behavior.
+- [ ] Define controller pending/rearm behavior.
+- [ ] Define wraparound/reset behavior.
+- [ ] Freeze timer MMIO layout.
+
+## 6.4 Platform discovery / boot
+
+- [ ] Define Platform Information Block.
+- [ ] Define ROM layout and versioning.
+- [ ] Decide minimal boot console.
+- [ ] Define PLIO host integration.
+- [ ] Define QDX boot-device profile.
+- [ ] Define firmware -> Cosmic handoff.
+- [ ] Define power/reset MMIO.
 
 ---
 
-# 5. Define the Lighting platform interrupt-controller interface
+# 7. Freeze SIA ABI
 
-SIA32-P defines the CPU-level interrupt classes:
+Need a normative [`SIA32-ABI.md`] document.
+
+Current direction:
 
 ```text
-software
-timer
-external
+r0       zero
+r1-r6    arguments / returns / fast IPC message registers
+r7-r8    caller-saved temporaries
+r9-r12   callee-saved
+r13      sp
+r14      lr / caller-saved link
+r15      callee-saved general register; optional frame pointer
 ```
-
-The actual Lighting interrupt controller belongs in the platform specification rather than the generic SIA ISA.
-
-- [ ] Define CPU-visible external interrupt line/condition.
-- [ ] Define PLIO Notification to CPU interrupt mapping.
-- [ ] Define pending state.
-- [ ] Define per-source masking.
-- [ ] Define claim/identify operation.
-- [ ] Define acknowledge/complete operation.
-- [ ] Define priority model.
-- [ ] Define nesting/preemption policy.
-- [ ] Define spurious interrupt behavior.
-- [ ] Define interrupt-controller MMIO register layout.
-- [ ] Define interaction with `IENABLE` / `IPENDING` in SIA32-P.
-- [ ] Define software interrupt generation.
-- [ ] Add a Rust VM interrupt-controller model.
-
----
-
-# 6. Define architectural timer expectations
-
-A seL4-style kernel needs a reliable scheduling timer and monotonic time source.
-
-The timer should probably remain a platform MMIO device rather than become additional CPU privileged state.
-
-- [ ] Define a 64-bit monotonic counter.
-- [ ] Define counter frequency or discovery mechanism.
-- [ ] Define read semantics on a 32-bit CPU.
-- [ ] Define compare/deadline register.
-- [ ] Define one-shot timer behavior.
-- [ ] Define timer interrupt generation.
-- [ ] Define acknowledgement/rearm behavior.
-- [ ] Define behavior when programmed deadline is already in the past.
-- [ ] Define wraparound expectations.
-- [ ] Define reset value/behavior.
-- [ ] Decide whether periodic mode exists or is synthesized in software.
-- [ ] Define real-time clock separately from monotonic scheduling time.
-- [ ] Implement timer in Rust VM before Cosmic scheduler work.
-
----
-
-# 7. Freeze the SIA ABI
-
-Forge and Cosmic need a normative SIA ABI rather than a suggested convention.
 
 - [ ] Freeze argument registers.
 - [ ] Freeze return-value registers.
-- [ ] Freeze caller-saved registers.
-- [ ] Freeze callee-saved registers.
-- [ ] Freeze stack pointer role.
-- [ ] Freeze link register role.
-- [ ] Freeze frame pointer convention.
-- [ ] Define stack growth direction.
-- [ ] Define stack alignment.
-- [ ] Define scalar argument extension rules.
-- [ ] Define 64-bit integer argument/return conventions.
-- [ ] Define struct/aggregate argument passing.
-- [ ] Define small aggregate return convention.
-- [ ] Define large aggregate return convention.
-- [ ] Define varargs convention if Forge needs it.
-- [ ] Define TLS model/register convention if required.
-- [ ] Define syscall ABI.
-- [ ] Define trap argument/result convention.
-- [ ] Define kernel entry scratch-register usage.
-- [ ] Define unwind/debug frame conventions if desired.
-- [ ] Publish a normative `SIA32-ABI.md`.
+- [ ] Freeze caller/callee-save sets.
+- [ ] Freeze stack growth and 16-byte call-boundary alignment.
+- [ ] Freeze optional frame-pointer convention.
+- [ ] Define 64-bit integer arguments/results.
+- [ ] Define aggregate passing/returns.
+- [ ] Define varargs if required.
+- [ ] Decide TLS model.
+- [ ] Define normal `TRAP` syscall ABI.
+- [ ] Define fast IPC register ABI.
+- [ ] Define asynchronous trap/interrupt preservation rules.
+- [ ] Define kernel trap-frame layout.
+- [ ] Define unwind/debug metadata convention.
 
 ---
 
-# 8. Define object format and relocations
+# 8. Object format and relocations
 
-SIA uses short branches and PC-relative literal pools, so the assembler/linker ABI is particularly important.
-
-- [ ] Choose or define object-file container format.
-- [ ] Define section types.
-- [ ] Define symbol representation.
+- [ ] Choose/define object container.
+- [ ] Define sections/symbols.
 - [ ] Define absolute 32-bit relocation.
-- [ ] Define PC-relative branch relocation.
-- [ ] Define PC-relative call relocation.
+- [ ] Define branch/call relocations.
 - [ ] Define `LDPC.W` literal relocation.
-- [ ] Define far call/jump relocation strategy.
-- [ ] Define linker veneers/trampolines.
-- [ ] Define literal-pool placement rules.
-- [ ] Define overflow handling for out-of-range branches.
+- [ ] Define far call/jump veneers.
+- [ ] Define literal-pool placement.
+- [ ] Define overflow behavior.
 - [ ] Define data-pointer relocations.
 - [ ] Define TLS relocations if TLS is adopted.
-- [ ] Define executable image format for Cosmic user programs.
+- [ ] Define Cosmic executable image format.
 - [ ] Define kernel/firmware linker requirements.
-- [ ] Add relocation tests to Forge toolchain.
+- [ ] Add Forge relocation tests.
 
 ---
 
-# 9. Add a debug architecture later
+# 9. ROM/runtime ABI
 
-This is not required for first Cosmic boot because the Rust VM can provide richer debugging externally, but real FPGA systems eventually need hardware debug support.
+Strategy: [`SIA-ROM-RUNTIME.md`](SIA-ROM-RUNTIME.md).
+
+- [ ] Define fixed ROM ABI header.
+- [ ] Define ABI versioning.
+- [ ] Define stable vector/interface table.
+- [ ] Define feature bits.
+- [ ] Define compatibility rules.
+- [ ] Define ROM allocator/runtime entry conventions.
+- [ ] Keep allocator algorithms shared while allocator state remains per-kernel/per-process.
+
+---
+
+# 10. Debug architecture — later
 
 Possible `SIA32-D` work:
 
-- [ ] hardware instruction breakpoint.
-- [ ] hardware data watchpoint.
-- [ ] single-step support.
-- [ ] debug halt.
-- [ ] debug resume.
-- [ ] debug cause/status.
-- [ ] register inspection/modification mechanism.
-- [ ] memory inspection/modification mechanism.
-- [ ] external debug-port architecture.
-- [ ] interaction with interrupts and privilege state.
-- [ ] interaction with SMP.
+- [ ] instruction breakpoints.
+- [ ] data watchpoints.
+- [ ] single step.
+- [ ] debug halt/resume.
+- [ ] register/memory inspection.
+- [ ] external debug interface.
+
+The Rust VM can provide richer non-architectural debugging before this exists.
 
 ---
 
-# 10. Define SMP platform architecture when needed
+# 11. SMP platform — later
 
-`SIA32-A` supplies atomics and ordering, but a complete SMP platform also needs processor-management mechanisms.
+`SIA32-A` supplies atomics/order; platform work still needs:
 
-These should be specified separately from `SIA32-P`, likely as a Neutron/SIA SMP platform document.
+- [ ] CPU IDs/count.
+- [ ] secondary CPU reset/start.
+- [ ] interrupt-controller routing.
+- [ ] software IPIs.
+- [ ] per-CPU timers.
+- [ ] coherent-memory contract.
+- [ ] TLB-shootdown protocol.
+- [ ] CPU halt/park/restart.
 
-- [ ] CPU/hart identification.
-- [ ] discover number of CPUs.
-- [ ] secondary CPU reset/startup state.
-- [ ] secondary CPU release/start address.
-- [ ] interprocessor interrupt generation.
-- [ ] interprocessor interrupt acknowledgement.
-- [ ] CPU halt/park.
-- [ ] CPU restart.
-- [ ] TLB shootdown protocol expectations.
-- [ ] cache-coherence contract.
-- [ ] memory-ordering implications for SMP.
-- [ ] `SYNC.I` cross-CPU publication requirements.
-- [ ] per-CPU timer/interrupt expectations.
-- [ ] CPU failure/offline semantics if required.
+No new baseline privileged registers should be added merely for SMP.
 
 ---
 
-# Immediate specification order
-
-Work through the architecture in this sequence:
+# Immediate order
 
 ```text
-SIA32-I                mostly defined
-   |
-   v
-SIA32-P                defined
-   |
-   v
-1. encoding freeze     proposal written; still needs final freeze
-   |
-   v
-2. multi-register      semantics specified
-   |
-   v
-3. memory model        SIA-TSO specified
-   |
-   v
-4. cache + SYNC.I      baseline specified
-   |
-   v
-5. Lighting interrupt controller
-   |
-   v
-6. Lighting timer
-   |
-   v
-7. SIA ABI
-   |
-   v
-8. object format + relocations
-   |
-   v
-Rust full-system VM
-   |
-   v
-Cosmic development
+1. freeze remaining SIA32-I instruction encodings
+2. freeze compact SYSTEM encoding
+3. write/freeze SIA32 ABI
+4. freeze Lighting RESET/TRAP vectors + physical memory map
+5. define Lighting interrupt controller
+6. define monotonic timer
+7. define Platform Information Block / boot contract
+8. define object + relocation format
+9. implement Rust full-system VM
+10. boot Cosmic
 ```
-
-The debug and SMP specifications can follow once the single-CPU Lighting/Cosmic platform is working.
 
 ---
 
-# Definition of "SIA32 system architecture complete"
+# Definition of first protected SIA system complete
 
-For the first protected single-CPU Lighting implementation, SIA is complete enough when all of the following are stable:
-
-- [ ] SIA32-I instruction semantics and encodings are frozen.
-- [ ] SIA32-P is frozen.
-- [x] multi-register exception/restart behavior is frozen.
-- [x] memory ordering is specified; final v1 freeze follows encoding integration/tests.
-- [~] `FENCE`, `SYNC.I`, and `TLBFENCE` relationships are specified; encodings still need final freeze.
-- [x] MMIO ordering/cacheability behavior is specified.
-- [x] DMA visibility/coherency rules are specified for Lighting.
-- [ ] SIA ABI is frozen.
-- [ ] object/relocation formats are sufficient for Forge.
-- [ ] Lighting timer and interrupt-controller contracts are frozen.
-- [ ] the Rust VM can implement all architectural behavior without inventing unspecified rules.
-- [ ] Cosmic can boot and run protected user processes entirely against documented architecture.
+- [ ] SIA32-I encodings frozen.
+- [~] SIA32-P semantics frozen; tests pending.
+- [x] six-register privileged state model defined.
+- [x] MMU semantics defined.
+- [x] multi-register fault semantics defined.
+- [x] memory model/cache/DMA semantics defined.
+- [ ] SIA ABI frozen.
+- [ ] object/relocation format sufficient for Forge.
+- [ ] Lighting fixed vectors/memory map frozen.
+- [ ] Lighting interrupt controller frozen.
+- [ ] Lighting timer frozen.
+- [ ] boot/platform-discovery contract frozen.
+- [ ] Rust VM can implement all behavior without inventing unspecified rules.
+- [ ] Cosmic boots and runs protected user processes entirely against documented architecture.
