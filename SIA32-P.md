@@ -4,16 +4,17 @@
 
 - Extension: **SIA32-P**
 - Target base: `SIA32-I`
-- Purpose: protected operating systems, virtual memory, traps, interrupts, and system control
+- Purpose: protected operating systems, traps, interrupts, system control, and MMU control
 - Required by Lighting/Cosmic: **YES**
-- Required for a user-only or deeply embedded SIA implementation: **NO**
 - Initial target: single-processor Lighting system
+- MMU semantics: [`SIA32-MMU.md`](SIA32-MMU.md)
+- Memory ordering: [`SIA32-MEM.md`](SIA32-MEM.md)
 
-`SIA32-P` defines the minimal privileged architecture needed to run a protected capability-oriented operating system such as Cosmic.
+`SIA32-P` defines the minimal privileged CPU mechanisms required for a protected capability-oriented operating system such as Cosmic.
 
-The design is intentionally small. It provides the mechanisms the kernel needs while avoiding architectural policy about processes, threads, capabilities, IPC, files, drivers, or scheduling.
+The privileged architecture deliberately defines **mechanism, not operating-system policy**. Processes, threads, capabilities, IPC objects, schedulers, drivers, filesystems, and services remain software abstractions.
 
-The core model is:
+The core privilege model is:
 
 ```text
 User mode
@@ -22,7 +23,7 @@ User mode
     v
 Supervisor mode
     |
-    | SRET
+    | SRET or SRETCTX
     v
 User mode
 ```
@@ -34,9 +35,7 @@ U   User
 S   Supervisor
 ```
 
-There is no separate machine mode, hypervisor mode, interrupt mode, abort mode, or undefined-instruction mode in the baseline architecture.
-
-All synchronous exceptions and asynchronous interrupts enter the same supervisor trap mechanism and record their reason in privileged state.
+There is no separate machine, hypervisor, IRQ, abort, undefined-instruction, or firmware privilege mode in the baseline architecture.
 
 ---
 
@@ -45,301 +44,254 @@ All synchronous exceptions and asynchronous interrupts enter the same supervisor
 `SIA32-P` is designed to support:
 
 - a small capability microkernel;
-- strict isolation between kernel and user software;
-- separate virtual address spaces;
-- precise page faults;
-- protected read/write/execute mappings;
-- fast system calls;
+- strict User/Supervisor isolation;
+- precise exceptions;
+- fast system calls and IPC;
 - asynchronous interrupts;
 - timer-driven preemption;
-- user-level device servers;
+- user-level system services and drivers;
+- protected virtual memory through `SIA32-MMU`;
 - protected DMA through platform facilities such as PLIO;
-- deterministic implementation in the SIA Rust full-system VM;
+- deterministic implementation in the Rust full-system VM;
 - straightforward later FPGA implementation;
 - future SMP use with `SIA32-A`.
 
-The architecture should remain small enough that the complete privileged state can be understood on one page.
+A major performance objective is that an IPC handoff between two address spaces whose translations are already cached requires **no TLB flush**.
 
 ## 1.1 Non-goals
 
-The baseline does **not** define:
+The baseline does not define:
 
-- process objects;
+- processes or thread objects;
 - capability objects;
-- IPC objects;
+- IPC endpoint formats;
 - scheduler policy;
-- filesystem semantics;
-- POSIX abstractions;
-- device classes;
-- DMA descriptor formats;
-- a hypervisor;
-- nested virtualization;
-- security domains above supervisor mode;
-- ARM-style banked register sets;
-- MIPS-style software-filled TLB entries as the mandatory paging interface.
-
-Those belong to Cosmic, PLIO/QDX, later extensions, or platform specifications.
+- filesystem or POSIX abstractions;
+- device classes or DMA descriptor formats;
+- hardware virtualization;
+- banked general-purpose registers;
+- software-filled TLBs as the mandatory paging interface.
 
 ---
 
-# 2. Design influences
+# 2. Privilege levels
 
-The architecture takes useful ideas from several established RISC designs without copying any one of them.
-
-## 2.1 Early ARM
-
-Early ARM demonstrates that a small RISC core can provide protected execution, exception entry, privileged state, and interrupt masking with modest hardware.
-
-SIA deliberately does **not** copy ARM's multiple privileged exception modes and banked general registers. Separate IRQ, FIQ, abort, undefined, and supervisor modes are unnecessary for the Cosmic model and complicate context handling.
-
-SIA keeps one supervisor mode and one trap path.
-
-## 2.2 MIPS
-
-MIPS strongly influences the SIA trap model:
-
-- compact privileged system state;
-- explicit exception cause;
-- saved exception program counter;
-- fault-address reporting;
-- simple exception return;
-- software-visible interrupt pending/mask state.
-
-MIPS's software-managed TLB is elegant, especially for early implementations, but it makes TLB refill a kernel ABI concern. The baseline SIA32-P instead defines a simple in-memory page-table format and architectural page-table walk. An implementation may cache translations however it chooses.
-
-## 2.3 RISC-V
-
-RISC-V contributes several useful simplifications:
-
-- a clean user/supervisor distinction;
-- explicit privileged system registers;
-- a page-table-root register;
-- address-space identifiers;
-- explicit translation-cache synchronization;
-- a scratch system register for trap entry;
-- no requirement for banked integer registers.
-
-SIA does not adopt RISC-V's separate machine privilege level for the baseline Lighting computer. The supervisor kernel directly owns the machine.
-
----
-
-# 3. Privilege levels
-
-## 3.1 User mode (`U`)
-
-User mode executes ordinary applications and user-space system services.
+## 2.1 User mode (`U`)
 
 User mode:
 
-- may execute all unprivileged `SIA32-I` instructions;
-- may execute supported unprivileged extensions;
-- may access only virtual pages whose mappings permit user access;
-- may invoke the kernel with `TRAP`;
-- may not modify MMU state;
-- may not modify interrupt state;
-- may not access privileged system registers;
-- may not execute privileged instructions;
-- may not directly access supervisor-only mappings.
+- may execute all implemented unprivileged SIA instructions;
+- may access only mappings permitted by the current `VMCTX` and PTE permissions;
+- may enter Supervisor mode using `TRAP`;
+- may not modify privileged system state;
+- may not modify translation state;
+- may not modify interrupt-control state;
+- may not execute privileged operations.
 
 An attempted privileged operation in User mode raises `PRIVILEGE`.
 
-## 3.2 Supervisor mode (`S`)
+## 2.2 Supervisor mode (`S`)
 
-Supervisor mode is the highest architectural privilege level.
+Supervisor mode is the highest baseline privilege level.
 
-Supervisor mode may:
+It may:
 
 - access privileged system registers;
-- configure virtual memory;
+- install an MMU context;
+- change page tables in ordinary memory;
+- synchronize cached translations;
 - configure trap entry;
-- mask/unmask CPU interrupt classes;
-- return to User mode;
-- map physical memory and devices;
-- execute privileged memory-management operations.
+- mask and unmask CPU interrupt classes;
+- map physical memory and MMIO through page tables;
+- return to User or Supervisor execution.
 
-The operating system is responsible for deciding which authority to delegate to user processes.
-
-There is no privilege level above Supervisor in the baseline.
+Supervisor mode does not automatically bypass page `R/W/X` permissions when translation is enabled. This keeps mapping semantics uniform and catches kernel permission mistakes.
 
 ---
 
-# 4. Reset state
+# 3. Reset state
 
 On architectural reset:
 
 ```text
 mode            = S
-interrupts      = disabled
-virtual memory  = disabled
+STATUS.IE       = 0
+STATUS.VM       = 0
 PC              = platform reset vector
 ```
 
-The processor begins in physical-address mode so firmware can execute before page tables exist.
+Translation is initially disabled, so firmware begins with physical addressing.
 
-Other privileged registers enter defined reset values given below.
+The SIA Platform Specification defines:
 
-The platform specification defines:
-
-- reset-vector physical address;
-- ROM location;
-- RAM physical layout;
+- the reset-vector physical address;
+- ROM and RAM layout;
 - MMIO layout;
-- interrupt-controller device;
-- timer device.
-
-SIA32-P defines the CPU behavior, not those platform addresses.
-
----
-
-# 5. Privileged system registers
-
-The baseline privileged state consists of the following registers.
-
-| Register | Access | Purpose |
-|---|---|---|
-| `STATUS` | S RW | privilege, interrupt and MMU control |
-| `TVEC` | S RW | trap-entry address |
-| `EPC` | S RW | saved exception/interrupt PC |
-| `CAUSE` | S RW | trap cause |
-| `BADADDR` | S RW | faulting virtual/physical address where applicable |
-| `SCRATCH` | S RW | kernel-defined trap scratch value |
-| `VMROOT` | S RW | physical page number of root page table |
-| `ASID` | S RW | current address-space identifier |
-| `IENABLE` | S RW | enabled interrupt classes |
-| `IPENDING` | S RO/W1C* | pending interrupt classes |
-
-`*` Platform-defined software-pending bits may be writable; hardware interrupt pending bits are normally read-only. Exact clearing of external interrupts belongs to the interrupt-controller specification.
-
-A future extension may add performance counters, debug registers, SMP identifiers, virtualization state, or additional interrupt classes without changing these baseline semantics.
+- timer;
+- interrupt controller;
+- device discovery and platform identification.
 
 ---
 
-# 6. System-register instructions
+# 4. Privileged system registers
 
-SIA32-P defines privileged operations conceptually equivalent to:
+The baseline privileged state is deliberately small:
+
+| ID | Register | Access | Purpose |
+|---:|---|---|---|
+| `0x0` | `STATUS` | S RW | interrupt, previous-mode, and VM-enable state |
+| `0x1` | `TVEC` | S RW | common supervisor trap-entry address |
+| `0x2` | `EPC` | S RW | saved exception/interrupt return PC |
+| `0x3` | `CAUSE` | S RO | trap cause; written by hardware |
+| `0x4` | `BADADDR` | S RO | faulting address where applicable |
+| `0x5` | `SCRATCH` | S RW | software-defined trap scratch value; `SSWAP` permitted |
+| `0x6` | `VMCTX` | S RW | complete MMU context: root + 12-bit ASID |
+| `0x7` | reserved | — | reserved for future baseline growth |
+| `0x8` | `IENABLE` | S RW | enabled architectural interrupt classes |
+| `0x9` | `IPENDING` | S RO* | pending architectural interrupt classes |
+| `0xA..0xF` | reserved | — | future baseline growth |
+
+`*` A later platform/SMP extension may define specific software-pending bits as writable. External hardware pending state is not cleared by arbitrary CPU-register writes.
+
+## 4.1 `VMCTX` is the only architectural address-space context register
+
+The previous draft exposed separate `VMROOT` and `ASID` registers. They are removed from the baseline privileged architecture.
+
+The active context is instead represented only by:
+
+```text
+VMCTX[31:12]    root physical address >> 12
+VMCTX[11:0]     ASID
+```
+
+Thus:
+
+```text
+root physical address = VMCTX[31:12] << 12
+ASID                  = VMCTX[11:0]
+```
+
+The root is therefore 4 KiB aligned even though normal SIA pages are 2 KiB.
+
+Software that needs either field separately reads `VMCTX` and masks/shifts it in ordinary registers.
+
+This avoids transient states in which a new root is paired with an old ASID or vice versa.
+
+Full page-table geometry, PTE format, 2 KiB pages, 1 MiB superpages, ASID behavior, global mappings, and TLB semantics are normative in `SIA32-MMU.md`.
+
+---
+
+# 5. System-register instructions
+
+SIA32-P defines:
 
 ```asm
 SREAD  rd, sr          ; rd = system_register[sr]
 SWRITE sr, rs          ; system_register[sr] = rs
-SSWAP  rd, sr          ; atomically exchange rd and system_register[sr]
+SSWAP  rd, sr          ; exchange GPR and swap-safe system register
+
 SRET                   ; return from supervisor trap
-TLBFENCE                ; synchronize all translation state
+SRETCTX rs             ; install VMCTX from rs and return
+
+TLBFENCE               ; synchronize/invalidate required local translation state
 TLBFENCE.VA rs          ; synchronize translation for virtual address
-TLBFENCE.ASID rs        ; synchronize translations for ASID
-WFI                    ; wait for interrupt hint
+TLBFENCE.ASID rs        ; synchronize non-global translations for ASID
+
+WFI                    ; wait-for-interrupt hint
 ```
 
-Exact binary encodings remain part of the SIA encoding-freeze work.
+`FENCE` and `SYNC.I` use the system encoding space but are unprivileged operations specified by `SIA32-MEM`.
 
-All except any explicitly documented user-readable register operation are privileged.
+## 5.1 `SSWAP`
 
-## 6.1 Why `SSWAP` exists
+The baseline permits `SSWAP` only with `SCRATCH`.
 
-`SSWAP` gives a trap handler a safe first instruction without architectural banked registers.
-
-The kernel may keep a kernel stack pointer in `SCRATCH` while User mode is running:
+The intended fast trap-stack transition is:
 
 ```asm
-; immediately after trap from user
 SSWAP sp, SCRATCH
 ```
 
-After the instruction:
+If User mode was running:
 
 ```text
-sp       = kernel stack pointer
-SCRATCH  = saved user stack pointer
+before:
+    sp      = user stack pointer
+    SCRATCH = CPU/kernel stack pointer
+
+after:
+    sp      = CPU/kernel stack pointer
+    SCRATCH = saved user stack pointer
 ```
 
-The handler may then save the remaining user registers to the kernel stack.
-
-Before returning:
-
-```asm
-SSWAP sp, SCRATCH
-SRET
-```
-
-This follows the principle of a software-managed trap frame while avoiding unsafe use of a user-controlled stack.
+No banked GPR set is required.
 
 ---
 
-# 7. `STATUS` register
+# 6. `STATUS`
 
-The initial `STATUS` register contains the following architecturally defined fields.
+The baseline `STATUS` register contains:
 
 ```text
 bit 0      IE       global interrupt enable
 bit 1      PIE      saved previous IE
 bit 2      PP       previous privilege (0=U, 1=S)
 bit 3      VM       virtual-memory translation enable
-bits 4..31          reserved, read as zero until assigned
+bits 4..31          reserved; read as zero until assigned
 ```
 
-The current privilege mode is architectural processor state rather than a normal writable field in `STATUS`.
+The current privilege mode is architectural processor state, not a directly writable `STATUS` field.
 
-## 7.1 `IE`
+## 6.1 `IE`
 
-When `IE=1`, enabled asynchronous interrupt classes may trap to Supervisor mode.
+When `IE=1`, enabled asynchronous interrupt classes may trap.
 
-When `IE=0`, maskable asynchronous interrupts do not trap, but their pending state may remain recorded.
+When `IE=0`, maskable asynchronous interrupts do not trap, although pending state may remain recorded.
 
-Synchronous exceptions are not disabled by `IE`.
+Synchronous exceptions are never disabled by `IE`.
 
-## 7.2 `PIE` and `PP`
+## 6.2 `PIE` and `PP`
 
-`PIE` and `PP` are written automatically on trap entry and consumed by `SRET`.
+Trap entry automatically saves the previous interrupt-enable state and privilege level in `PIE` and `PP`.
 
-They provide one architectural level of saved trap-return state.
+There is one architectural level of trap-return state. A kernel that enables nested interrupts must first save `EPC`, `CAUSE`, `STATUS`, and any other required state in software.
 
-A kernel that wishes to permit nested interrupts must save `EPC`, `CAUSE`, `STATUS`, and any other required state before re-enabling interrupts.
+## 6.3 `VM`
 
-## 7.3 `VM`
+When `VM=0`, normal instruction and data addresses are physical addresses and translation is bypassed.
 
-When `VM=0`:
+When `VM=1`, instruction fetches and data accesses use `VMCTX` under the rules in `SIA32-MMU.md`.
 
-- instruction addresses are physical addresses;
-- load/store addresses are physical addresses;
-- page-table translation is bypassed.
+Changing `VMCTX` does **not** flush the TLB.
 
-When `VM=1`, normal instruction and data accesses are translated through the current `VMROOT`/`ASID` context.
-
-Supervisor code is allowed to change `VM`.
-
-Changing `VMROOT`, `ASID`, page-table memory, or `VM` may require a `TLBFENCE` operation as specified below.
+Changing page-table memory may require a `TLBFENCE*` operation as specified by `SIA32-MMU`.
 
 ---
 
-# 8. Trap vector
+# 7. Trap vector
 
-`TVEC` contains the virtual address of the common supervisor trap entry point.
+`TVEC` contains the address of the common Supervisor trap-entry point.
 
 Requirements:
 
-- `TVEC` must be 2-byte aligned;
-- all synchronous exceptions enter at `TVEC`;
-- all asynchronous interrupts enter at `TVEC`;
-- the handler reads `CAUSE` to distinguish the reason.
+- `TVEC` is 2-byte aligned;
+- synchronous exceptions enter at `TVEC`;
+- asynchronous interrupts enter at `TVEC`;
+- software reads `CAUSE` to dispatch.
 
-The baseline deliberately uses a **single direct vector** rather than a table of hardware vectors.
-
-This keeps CPU state and exception entry simple. Software may construct its own dispatch table immediately after entry.
-
-A later optional vectored-interrupt extension may be added if measurements justify it.
+The baseline deliberately uses one direct vector. A hardware vector table is not required.
 
 ---
 
-# 9. Trap entry
+# 8. Trap entry
 
-A trap may be caused by:
+A trap may result from:
 
 - a synchronous exception;
-- a `TRAP` instruction;
+- `TRAP`;
 - an asynchronous interrupt.
 
-Trap entry is precise.
-
-The processor performs the following architectural transition:
+Trap entry is precise and performs:
 
 ```text
 EPC        = saved PC
@@ -352,37 +304,31 @@ mode       = S
 PC         = TVEC
 ```
 
-Other general-purpose registers are unchanged.
+General-purpose registers are unchanged.
 
-There are no banked general registers.
+The active `VMCTX` is **not changed on trap entry**. Cosmic kernel mappings are expected to be globally mapped (`G=1`) where appropriate, so the kernel can execute immediately in every user address space.
 
-## 9.1 Saved PC semantics
+## 8.1 Saved PC semantics
 
-For a synchronous exception, `EPC` identifies the instruction that caused the exception.
+For a synchronous fault, `EPC` identifies the faulting instruction.
 
-For `TRAP`, `EPC` identifies the `TRAP` instruction itself. A kernel implementing a system call normally advances `EPC` by 2 before returning.
+For `TRAP`, `EPC` identifies the `TRAP` instruction. A consumed system call normally advances `EPC` by 2 before return.
 
-For an asynchronous interrupt, `EPC` identifies the next instruction that would have executed if the interrupt had not been taken.
+For an asynchronous interrupt, `EPC` identifies the next instruction that would otherwise execute.
 
-This makes synchronous faults restartable while asynchronous interrupts resume naturally.
+## 8.2 Trap while already in Supervisor mode
 
-## 9.2 Trap while already in Supervisor mode
+Supervisor traps use the same mechanism.
 
-A trap in Supervisor mode uses the same mechanism.
-
-Because the baseline has only one architectural `EPC`/`CAUSE` save level, supervisor software must save trap state before enabling nested interrupts.
-
-An unexpected synchronous fault in an early supervisor trap prologue is considered a kernel-level failure and may lead to panic/reset according to platform policy.
-
-This avoids hidden hardware nesting stacks.
+Because there is only one hardware save level, software must save trap state before intentionally enabling nesting.
 
 ---
 
-# 10. Trap return
+# 9. Trap return
 
-`SRET` is privileged.
+## 9.1 `SRET`
 
-Conceptually it performs:
+`SRET` performs:
 
 ```text
 mode       = STATUS.PP
@@ -392,32 +338,69 @@ STATUS.PP  = U
 PC         = EPC
 ```
 
-`SRET` validates that the resulting PC obeys normal instruction alignment and translation rules.
+`VMCTX` is unchanged.
 
-Returning to User mode does not implicitly alter `VMROOT`, `ASID`, or mappings.
+The redirected instruction fetch then occurs normally under the resulting privilege state and current MMU context. `SRET` does not pre-walk the target mapping merely to validate it. If the next fetch faults, the normal precise instruction fault is taken.
 
-The kernel is expected to install the desired address-space state before `SRET`.
+## 9.2 `SRETCTX rs`
+
+`SRETCTX` is the fast address-space-switch-and-return operation used by IPC and scheduling.
+
+Conceptually it performs one architectural control transition:
+
+```text
+VMCTX      = rs
+mode       = STATUS.PP
+STATUS.IE  = STATUS.PIE
+STATUS.PIE = 1
+STATUS.PP  = U
+PC         = EPC
+```
+
+Properties:
+
+- `SRETCTX` is privileged.
+- `rs` supplies the complete 32-bit `VMCTX` value.
+- the new root and ASID become active together;
+- installing `VMCTX` **never flushes TLB entries**;
+- global (`G=1`) translations remain usable;
+- old non-global translations remain cached under their old ASIDs;
+- the operation is locally serializing with respect to instruction and data translation;
+- it is not a general data-memory `FENCE`;
+- it does not imply `SYNC.I`;
+- it does not pre-walk `EPC` or otherwise force a page-table walk on the return path.
+
+After `SRETCTX` retires, the next instruction fetch uses the newly installed `VMCTX`. If that fetch cannot translate or execute `EPC`, the resulting instruction page/access fault is taken normally and precisely.
+
+Typical Cosmic IPC tail:
+
+```asm
+; receiver EPC/STATUS already installed
+; receiver user SP is in SCRATCH
+SSWAP   sp, SCRATCH
+SRETCTX r8              ; r8 = receiver VMCTX
+```
+
+This is intentionally optimized for direct handoff between protection domains.
 
 ---
 
-# 11. Exception causes
+# 10. Exception causes
 
-`CAUSE` is a 32-bit register.
+`CAUSE` is 32 bits:
 
 ```text
 bit 31      INTERRUPT
-bits 30..8  reserved
+bits 30..8  reserved, except TRAP immediate field below
 bits 7..0   cause code
 ```
 
-When `INTERRUPT=0`, the cause is synchronous.
-
-Initial synchronous cause codes:
+Initial synchronous causes:
 
 | Code | Name | Meaning |
 |---:|---|---|
-| `0x00` | `ILLEGAL_INSTRUCTION` | undefined/reserved instruction |
-| `0x01` | `PRIVILEGE` | privileged operation attempted without authority |
+| `0x00` | `ILLEGAL_INSTRUCTION` | undefined or reserved instruction |
+| `0x01` | `PRIVILEGE` | privileged operation attempted in User mode |
 | `0x02` | `BREAKPOINT` | `BREAK` |
 | `0x03` | `TRAP` | software `TRAP imm8` |
 | `0x04` | `INSTRUCTION_ALIGNMENT` | invalid instruction alignment |
@@ -431,41 +414,33 @@ Initial synchronous cause codes:
 | `0x0C` | `STORE_ACCESS_FAULT` | physical store access failed |
 | `0x0D` | `ARITHMETIC` | trapping arithmetic operation |
 
-Additional synchronous causes may be assigned later.
-
-For `TRAP`, the architectural `imm8` value must remain available to the handler. The simplest encoding is:
+For `TRAP`:
 
 ```text
 CAUSE[15:8] = trap immediate
 CAUSE[7:0]  = TRAP
 ```
 
-when `CAUSE.INTERRUPT=0` and the cause is `TRAP`.
+`BADADDR` contains the faulting address for address-related exceptions where defined.
 
 ---
 
-# 12. Interrupts
+# 11. Interrupts
 
-SIA32-P defines CPU-visible interrupt classes but does not define a complete platform interrupt controller.
-
-Initial interrupt cause codes are:
+SIA32-P defines three CPU-visible interrupt classes:
 
 | Code | Name | Purpose |
 |---:|---|---|
 | `0x01` | `SOFTWARE_INTERRUPT` | software/IPI-style notification |
-| `0x02` | `TIMER_INTERRUPT` | scheduler/time interrupt |
+| `0x02` | `TIMER_INTERRUPT` | scheduler/deadline interrupt |
 | `0x03` | `EXTERNAL_INTERRUPT` | platform interrupt controller has pending work |
 
-An interrupt is represented as:
+An asynchronous interrupt is represented as:
 
 ```text
 CAUSE.INTERRUPT = 1
 CAUSE.CODE      = interrupt class
 ```
-
-## 12.1 Interrupt enable
-
-`IENABLE` contains one bit per architectural interrupt class.
 
 An interrupt may trap when:
 
@@ -479,627 +454,178 @@ IPENDING[class] == 1
 
 Synchronous exceptions ignore these masks.
 
-## 12.2 External interrupt controller
-
-The CPU need not expose one interrupt bit per device.
-
-The Lighting platform may provide one `EXTERNAL_INTERRUPT` input from the platform interrupt/notification controller. After entry, Cosmic queries that controller to identify and acknowledge the source.
-
-This matches PLIO's model in which device notifications are aggregated and software claims the specific pending source.
-
-## 12.3 Timer
-
-The architectural CPU only requires a timer interrupt class.
-
-The actual monotonic counter and compare/timer registers may be platform MMIO devices rather than privileged CPU registers.
-
-This keeps calendar/time facilities outside the core ISA.
+The SIA Platform Specification defines the timer, external interrupt-controller interface, software-interrupt generation, claim/complete rules, and mapping from PLIO Notification to `EXTERNAL_INTERRUPT`.
 
 ---
 
-# 13. Virtual address model
+# 12. MMU relationship
 
-SIA32-P uses a 32-bit virtual address space.
+All virtual-memory semantics are normative in [`SIA32-MMU.md`](SIA32-MMU.md).
 
-The baseline page size is:
-
-```text
-4096 bytes (4 KiB)
-```
-
-Virtual-address decomposition:
+The required first Lighting MMU profile is:
 
 ```text
-31                    22 21                    12 11             0
-+-----------------------+------------------------+----------------+
-|       L1 index        |       L0 index         | page offset    |
-|       10 bits         |       10 bits          |   12 bits      |
-+-----------------------+------------------------+----------------+
+Address space             32-bit
+Normal page               2 KiB
+Superpage                 1 MiB
+ASID                      12 bits / 4096 values
+Page tables               3 levels
+VA                         L2=6, L1=6, L0=9, offset=11
+L1 leaf                   1 MiB superpage
+L0 leaf                   2 KiB page
+VMCTX                     root>>12 (20 bits) + ASID (12 bits)
+root alignment            4 KiB
+SWRITE VMCTX              never flushes TLB
 ```
 
-Each page-table page contains 1024 32-bit entries and therefore occupies exactly one 4 KiB page.
+Typical global mappings are:
 
-The baseline supports only 4 KiB leaf mappings.
+```text
+G=1
+    Cosmic kernel
+    universal ROM libraries
+    universal ROM constants
+    universal system/IPC stubs
+```
 
-Large/superpages are deliberately deferred.
+Typical ASID-tagged mappings are:
+
+```text
+G=0
+    application code
+    heap
+    stack
+    writable globals
+    TLS
+    per-process data
+    private/shared-memory mappings whose VA/PA identity is not globally invariant
+```
+
+SIA32-P does not define separate instruction and data page types. `R/W/X/U/G` permissions define mapping use.
 
 ---
 
-# 14. `VMROOT` and `ASID`
+# 13. Translation synchronization
 
-## 14.1 `VMROOT`
-
-`VMROOT` contains the 20-bit physical page number of the current L1 root page table.
-
-Conceptually:
-
-```text
-root_physical_address = VMROOT << 12
-```
-
-The remaining high bits of the 32-bit system register are reserved if physical addresses are limited to 32 bits.
-
-Page tables are always accessed by **physical address** during the page-table walk.
-
-## 14.2 `ASID`
-
-`ASID` identifies the current address space for cached translations.
-
-Baseline width:
-
-```text
-8 bits
-```
-
-Therefore at least 256 distinguishable ASID values are available before reuse.
-
-ASID value zero is valid and has no special meaning.
-
-An implementation may contain no TLB at all, but must behave as if translations associated with distinct ASIDs do not alias.
-
-When an ASID is reused for a different address space, software must perform the required translation fence.
-
----
-
-# 15. Page-table entry format
-
-A page-table entry is one naturally aligned 32-bit little-endian word.
-
-```text
-31                                      12 11                 0
-+-----------------------------------------+--------------------+
-|             physical PPN                |       flags        |
-|               20 bits                   |      12 bits       |
-+-----------------------------------------+--------------------+
-```
-
-Initial flag allocation:
-
-```text
-bit 0   V      valid
-bit 1   R      readable
-bit 2   W      writable
-bit 3   X      executable
-bit 4   U      accessible from User mode
-bit 5   G      global mapping; ASID-independent TLB entry
-bits 6..11    software-reserved
-```
-
-The six software-reserved bits are ignored by hardware and preserved in memory.
-
-They may be used by Cosmic for mapping metadata.
-
-## 15.1 Invalid entry
-
-If `V=0`, the entry is invalid and translation raises the corresponding page fault.
-
-## 15.2 Non-leaf entry
-
-An entry is a pointer to the next page-table level when:
-
-```text
-V = 1
-R = 0
-W = 0
-X = 0
-```
-
-Its PPN identifies the physical page containing the next-level page table.
-
-`U` and `G` are ignored for a non-leaf entry in the baseline.
-
-## 15.3 Leaf entry
-
-An entry is a leaf mapping when:
-
-```text
-V = 1
-AND
-(R | W | X) != 0
-```
-
-The PPN identifies the mapped 4 KiB physical frame.
-
-Unlike RISC-V Sv32, SIA does not require `R=1` when `W=1`; read-only, write-only, execute-only, read/write, read/execute, and read/write/execute pages are architecturally representable.
-
-Operating systems may choose a narrower policy.
-
----
-
-# 16. Page-table walk
-
-When `STATUS.VM=1`, an instruction fetch or data access performs the following conceptual translation.
-
-Given virtual address `va`:
-
-```text
-l1 = va[31:22]
-l0 = va[21:12]
-off = va[11:0]
-```
-
-## 16.1 Level 1
-
-```text
-root = VMROOT << 12
-pte1_address = root + l1 * 4
-pte1 = physical_read32(pte1_address)
-```
-
-Requirements:
-
-- inaccessible physical page-table memory raises the appropriate access fault;
-- invalid `pte1` raises the appropriate page fault;
-- a leaf at L1 is reserved in the baseline and raises a page fault;
-- a valid non-leaf supplies the L0 table PPN.
-
-## 16.2 Level 0
-
-```text
-l0_table = pte1.PPN << 12
-pte0_address = l0_table + l0 * 4
-pte0 = physical_read32(pte0_address)
-```
-
-A valid leaf supplies the physical frame.
-
-```text
-pa = (pte0.PPN << 12) | off
-```
-
-Permission checks occur before the architectural memory operation is performed.
-
-The walk is conceptual. Implementations may use TLBs, caches, microcode, dedicated walkers, or other mechanisms as long as visible behavior is equivalent.
-
----
-
-# 17. Page permissions
-
-For User mode:
-
-```text
-U must be 1
-```
-
-and the access type must be permitted:
-
-```text
-instruction fetch requires X
-load              requires R
-store             requires W
-```
-
-For Supervisor mode:
-
-- `U` is ignored;
-- access type still requires the corresponding `R`, `W`, or `X` permission when translation is enabled.
-
-This means the kernel is not automatically allowed to write a read-only mapped page merely because it is privileged.
-
-Supervisor software can change the page-table entry or temporarily access the physical mapping by a deliberate mechanism if required.
-
-This rule catches kernel permission mistakes and keeps mapping semantics uniform.
-
-## 17.1 No implicit executable data
-
-A readable page is not automatically executable.
-
-A writable page is not automatically executable.
-
-Execute permission is explicit.
-
-This permits Cosmic to enforce W^X-style policies without additional hardware support.
-
----
-
-# 18. Page faults
-
-Translation/protection faults are precise.
-
-The relevant synchronous cause is written to `CAUSE` and:
-
-```text
-BADADDR = faulting virtual address
-EPC     = faulting instruction
-```
-
-The architectural memory operation has not completed.
-
-For a store fault, no part of the store may become architecturally visible.
-
-For a load fault, the destination register is not modified.
-
-For an instruction page fault, the instruction is not executed.
-
-Multi-register memory instructions defined by SIA must obey their separately specified precise/restart semantics. They are already prohibited for MMIO in the base architecture.
-
----
-
-# 19. Physical access faults
-
-Page translation can succeed while the resulting physical access fails, for example because:
-
-- no physical memory/device exists at the address;
-- a platform bus reports an error;
-- an MMIO target rejects the operation.
-
-These raise `*_ACCESS_FAULT` rather than `*_PAGE_FAULT`.
-
-`BADADDR` contains the address relevant to diagnosing the failed architectural access. For translated CPU accesses this should normally remain the original virtual address, while implementation/debug state may separately expose the physical bus address.
-
-This distinction lets Cosmic separate mapping errors from machine/device errors.
-
----
-
-# 20. Translation caches and `TLBFENCE`
-
-The architecture permits implementations to cache page-table translations.
-
-Page-table memory is ordinary memory. Writing a PTE does not by itself guarantee that a processor stops using an older cached translation.
-
-The kernel therefore uses explicit translation synchronization.
-
-## 20.1 `TLBFENCE`
+SIA32-P provides:
 
 ```asm
 TLBFENCE
-```
-
-After completion, no subsequent memory access by the current CPU may use a translation derived from stale page-table state for the current architecture context.
-
-A simple implementation may flush its entire TLB.
-
-## 20.2 `TLBFENCE.VA`
-
-```asm
 TLBFENCE.VA rs
-```
-
-Synchronizes cached translations corresponding to the virtual page containing `rs` for the current ASID, plus any implementation-required related walk-cache state.
-
-## 20.3 `TLBFENCE.ASID`
-
-```asm
 TLBFENCE.ASID rs
 ```
 
-Synchronizes cached non-global translations for the low 8-bit ASID supplied by `rs`.
+Their exact translation-cache semantics are defined by `SIA32-MMU`.
 
-The baseline does not require a combined VA+ASID operation. It may be added later if measurement shows value.
-
-## 20.4 Ordering
-
-A translation fence also orders prior stores to page-table memory before subsequent translations affected by the fence.
-
-This makes the instruction a memory-management fence rather than merely a command to invalidate one named TLB structure.
-
----
-
-# 21. Context switching
-
-A Cosmic address-space switch conceptually performs:
+Key distinction:
 
 ```text
-1. save old user CPU state
-2. install new VMROOT
-3. install new ASID
-4. execute required TLBFENCE if the ASID is being reused or mappings require it
-5. install new EPC and trap-return state
-6. SRET
+SWRITE VMCTX       switch address-space context; never flush
+TLBFENCE*          synchronize mappings that actually changed
+FENCE              ordinary data-memory ordering
+SYNC.I             data-write -> local instruction-fetch synchronization
 ```
 
-No hardware process identifier or capability table is required.
-
-The kernel owns the association between Cosmic tasks and `(VMROOT, ASID)`.
-
-Global mappings (`G=1`) may be used for kernel mappings that are identical in every address space.
+Ordinary IPC/context switching must not require `TLBFENCE` merely because the active address space changes.
 
 ---
 
-# 22. Kernel address-space convention
+# 14. System calls
 
-SIA32-P does not reserve a fixed virtual address range for the kernel.
+`TRAP imm8` is the architectural User-to-Supervisor entry mechanism.
 
-That is an ABI/platform decision.
+The ISA does not prescribe syscall numbers, capability formats, IPC object semantics, or argument registers. Those belong to the Cosmic/SIA ABI.
 
-For example, Cosmic may choose a split such as:
-
-```text
-lower virtual region       user address space
-upper virtual region       globally mapped Cosmic kernel
-```
-
-but the exact boundary is not architectural.
-
-A capability microkernel may therefore choose the layout that best fits its implementation.
-
----
-
-# 23. System calls
-
-The existing SIA `TRAP imm8` instruction is the architectural kernel-entry mechanism.
-
-In User mode:
-
-```asm
-TRAP imm8
-```
-
-enters Supervisor mode through the normal trap path.
-
-The architecture does not prescribe:
-
-- syscall numbers;
-- argument registers;
-- capability arguments;
-- IPC semantics;
-- return-value conventions.
-
-Those belong to the Cosmic ABI.
-
-Because all SIA base instructions are 16 bits, the kernel normally advances:
+Because base instructions are 16 bits, a successfully consumed syscall normally advances:
 
 ```text
 EPC += 2
 ```
 
-before returning from a successfully consumed system call.
+before return.
 
-A fault/restart mechanism may deliberately leave `EPC` unchanged.
-
----
-
-# 24. Breakpoints and debugging
-
-`BREAK` raises `BREAKPOINT` through the normal trap path.
-
-The baseline does not define hardware breakpoints, watchpoints, single-step state, or a separate debug privilege mode.
-
-Those may be added as `SIA32-D` or platform debug facilities later.
-
-The Rust full-system VM may provide stronger non-architectural debugging features without exposing them to guest software.
+A restartable operation may deliberately leave `EPC` unchanged.
 
 ---
 
-# 25. Wait for interrupt
+# 15. MMIO and DMA
+
+SIA32-P does not define special port-I/O instructions.
+
+Devices occupy the physical address space and are accessed through normal scalar loads/stores to MMIO mappings.
+
+MMIO ordering and cacheability are defined by `SIA32-MEM` and the platform profile.
+
+CPU virtual-memory protection and device DMA authority are distinct:
+
+```text
+CPU translation/protection     SIA32-MMU
+Device DMA protection          platform I/O architecture
+```
+
+For Lighting, PLIO provides protected DMA capability channels, so no general-purpose baseline IOMMU is required.
+
+Page tables must reside in normal coherent physical memory and must never be fetched through MMIO mappings.
+
+---
+
+# 16. `WFI`
 
 `WFI` is a privileged power/performance hint.
 
 Architecturally:
 
 - it may stop instruction issue until an interrupt becomes pending;
-- an implementation is permitted to treat it as a `NOP`;
-- it must not cause an enabled interrupt to be lost;
+- it may legally be implemented as a `NOP`;
+- it must not lose an interrupt;
 - it does not itself enable interrupts.
 
-The SIA Rust VM may use `WFI` as an opportunity to advance virtual time directly to the next scheduled device event.
+The Rust VM may use it as an opportunity to advance virtual time directly to the next scheduled event.
 
 ---
 
-# 26. MMIO and devices
+# 17. Interaction with `SIA32-A`
 
-SIA32-P does not introduce special I/O instructions.
-
-Devices are accessed through the normal physical memory address space.
-
-Cosmic controls device authority by controlling virtual mappings and, for DMA-capable PLIO devices, by programming the platform's protected DMA capability mechanism.
-
-User software cannot access an MMIO device unless Supervisor software explicitly maps that physical device region into its address space or delegates access through a driver/service.
-
-## 26.1 Page-table walks and MMIO
-
-Page-table memory must reside in normal physical memory suitable for page-table reads.
-
-A page-table walk must never use a device/MMIO mapping as a page table.
-
-The platform memory map may enforce this directly.
-
----
-
-# 27. DMA and IOMMU relationship
-
-CPU virtual memory protection does not by itself protect RAM from a bus-mastering device.
-
-SIA32-P therefore explicitly distinguishes:
+A single-CPU protected Lighting system uses:
 
 ```text
-CPU address translation/protection     SIA32-P MMU
-
-device DMA authority/protection        platform I/O architecture
+SIA32-I + SIA32-P + SIA32-MMU + SIA32-MEM
 ```
 
-For Lighting, PLIO provides the protected device DMA boundary. Devices receive bounded DMA handles rather than unrestricted physical addresses.
+A coherent shared-memory multiprocessor additionally uses `SIA32-A` and a platform SMP specification.
 
-No general-purpose IOMMU is required in the baseline Lighting machine if PLIO's DMA capability mechanism supplies the required isolation.
+A trap, interrupt, or context switch may invalidate an `LR.W` reservation as permitted by `SIA32-A`.
 
-This is important for a capability operating system: user-level drivers may be delegated device authority without giving the device arbitrary access to kernel memory.
+SMP platform mechanisms such as CPU identification, secondary-CPU startup, IPIs, and remote TLB shootdown are intentionally outside this baseline privilege specification.
 
 ---
 
-# 28. Interaction with `SIA32-A`
+# 18. Why only two privilege levels
 
-`SIA32-P` and `SIA32-A` are independent extensions.
-
-A single-processor protected machine may implement:
-
-```text
-SIA32-I + SIA32-P
-```
-
-A coherent shared-memory multiprocessor intended to run Cosmic should implement:
-
-```text
-SIA32-I + SIA32-P + SIA32-A
-```
-
-On a trap, interrupt, or context switch, an implementation may invalidate an `LR.W` reservation as already allowed by `SIA32-A`.
-
-For SMP, additional platform mechanisms are required:
-
-- CPU identification;
-- interprocessor interrupts;
-- coherent memory;
-- boot/stop control for secondary CPUs;
-- remote TLB-shootdown protocol implemented in software using IPIs.
-
-These do not require changing the basic two-level privilege model.
-
----
-
-# 29. Requirements for a seL4-style microkernel
-
-A small capability microkernel fundamentally needs mechanisms rather than policy.
-
-SIA32-P provides the CPU-side mechanisms required for that model:
-
-## Protection
-
-- User/Supervisor isolation.
-- User-access bit in every leaf PTE.
-- separate read/write/execute permissions.
-- precise privilege faults.
-
-## Address spaces
-
-- 32-bit virtual addresses.
-- 4 KiB frames.
-- explicit page-table objects in ordinary physical memory.
-- explicit root page table.
-- ASIDs.
-- map/unmap through kernel-controlled PTE updates.
-- explicit translation synchronization.
-
-## Kernel entry/exit
-
-- precise traps.
-- common trap vector.
-- saved exception PC.
-- cause register.
-- fault address.
-- trap scratch register.
-- safe kernel-stack switch using `SSWAP`.
-- `SRET`.
-
-## Scheduling
-
-- timer interrupt class.
-- global interrupt enable.
-- per-class masks/pending state.
-- `WFI` for idle.
-
-## User-level drivers
-
-- kernel-controlled device mappings.
-- external interrupts routed through kernel-visible interrupt objects/services.
-- protected DMA supplied by PLIO rather than unrestricted physical DMA.
-
-## SMP when required
-
-- add `SIA32-A` atomics and fences;
-- platform IPIs;
-- coherent memory;
-- software TLB shootdown.
-
-The hardware does **not** need to understand capabilities. Cosmic builds capabilities from these lower-level protection mechanisms.
-
----
-
-# 30. Why only two privilege levels
-
-Two privilege levels are sufficient for the baseline system because the trust structure is:
+The intended trust structure is:
 
 ```text
 hardware
-  |
-  v
-Cosmic microkernel              Supervisor
-  |
-  +--> drivers/services         User
-  +--> filesystem               User
-  +--> network stack            User
-  +--> display server           User
-  +--> applications             User
+   |
+   v
+Cosmic microkernel                  Supervisor
+   |
+   +-- drivers/services             User
+   +-- filesystem                   User
+   +-- network stack                User
+   +-- display server               User
+   +-- applications                 User
 ```
 
-The operating system deliberately moves most traditional kernel services out of Supervisor mode.
+Extra architectural modes for device drivers, interrupts, firmware, or system services do not improve this trust model.
 
-Adding separate architectural modes for drivers, interrupts, aborts, firmware, or hypervisors would not improve this trust model.
-
-If future SIA systems need hardware virtualization, it should be a separately specified extension rather than permanent baseline complexity.
+If hardware virtualization is later required, it should be a separate extension.
 
 ---
 
-# 31. Why no banked registers
+# 19. Required first Lighting profile
 
-Banked registers make exception entry fast but create hidden per-mode integer state and complicate context switching, debugging, formal reasoning, and software conventions.
-
-SIA instead has:
-
-```text
-one integer register file
-+
-one SCRATCH system register
-+
-software trap frames
-```
-
-`SSWAP` provides the one operation needed to safely transition from a user stack to a kernel stack.
-
-This is sufficient for a small kernel while keeping architectural state explicit.
-
----
-
-# 32. Why hardware-walked page tables
-
-A software-managed TLB can reduce MMU hardware, and remains a reasonable future profile for extremely small implementations.
-
-The baseline Lighting profile instead standardizes the page-table walk because it provides:
-
-- one portable Cosmic paging model;
-- one deterministic Rust VM model;
-- one page-fault contract;
-- simpler kernel code;
-- straightforward FPGA differential testing;
-- freedom for implementations to choose TLB size/shape invisibly.
-
-The hardware walker is intentionally small: at most two dependent 32-bit PTE reads for a TLB miss.
-
-Nothing in the architecture requires a cache or large TLB.
-
----
-
-# 33. Required first Lighting profile
-
-The first Lighting CPU intended to boot Cosmic must implement:
-
-```text
-SIA32-I
-SIA32-P
-```
-
-plus whichever base integer multiply/divide profile is selected for Lighting.
-
-The mandatory `SIA32-P` subset is the entire baseline defined here:
+The first CPU capable of booting Cosmic must implement:
 
 ```text
 U/S privilege
@@ -1109,228 +635,119 @@ EPC
 CAUSE
 BADADDR
 SCRATCH
-VMROOT
-ASID
+VMCTX
 IENABLE
 IPENDING
-SREAD / SWRITE / SSWAP
-SRET
-TLBFENCE
-TLBFENCE.VA
-TLBFENCE.ASID
-WFI
-4 KiB pages
-two-level page tables
-R/W/X/U/G permissions
-precise page/access faults
-software/timer/external interrupt classes
-```
 
-The initial Lighting workstation is single-CPU and therefore does not require `SIA32-A` for correctness.
-
-A later Lighting/Neutron SMP profile requires it.
-
----
-
-# 34. Full-system VM implementation requirements
-
-The Rust SIA VM must implement SIA32-P as architectural guest behavior rather than host shortcuts.
-
-Required VM components include:
-
-- current privilege mode;
-- all privileged registers;
-- trap entry and return;
-- page-table walker;
-- TLB or equivalent optional cache;
-- translation fences;
-- page-fault generation;
-- physical access faults;
-- interrupt pending/enable logic;
-- timer/external interrupt injection;
-- physical memory bus;
-- ROM/RAM/MMIO distinction.
-
-The VM should boot through the architectural reset vector and firmware.
-
-Normal Cosmic execution must not use emulator semihosting for services that the real machine provides through devices.
-
-Semihosting may remain as an explicit development/debug option.
-
----
-
-# 35. FPGA implementation requirements
-
-The FPGA implementation must produce the same architectural behavior as the Rust VM.
-
-In particular, the VM becomes the differential reference for:
-
-- trap PC values;
-- cause codes;
-- page-table walks;
-- permission failures;
-- TLB invalidation behavior;
-- interrupt acceptance;
-- `SRET` transitions;
-- physical access faults.
-
-Microarchitectural details remain free:
-
-```text
-VM                         FPGA
-------------------------------------------------------
-Rust hash/map TLB          associative hardware TLB
-Rust page walk             FSM/microcoded page walk
-virtual event interrupt    hardware interrupt input
-Vec/RAM backing            SDRAM/DDR controller
-```
-
-Only architectural observations must match.
-
----
-
-# 36. Open encoding work
-
-This document freezes privileged **semantics**, not final instruction encodings.
-
-The SIA encoding work still needs to allocate encodings for:
-
-```text
 SREAD
 SWRITE
 SSWAP
 SRET
+SRETCTX
 TLBFENCE
 TLBFENCE.VA
 TLBFENCE.ASID
 WFI
+
+precise exceptions
+software/timer/external interrupt classes
+SIA32-MMU semantics
+SIA32-MEM semantics
 ```
 
-These should use reserved base-growth or `EXT` space rather than stealing heavily used SIA32-I primary opcodes without code-density measurements.
-
-System-register identifiers also require stable numeric assignments.
+`VMROOT` and `ASID` are **not** separate baseline architectural system registers.
 
 ---
 
-# 37. Architectural conformance tests
+# 20. Full-system VM implementation requirements
 
-Before SIA32-P is considered frozen, the Rust VM should pass tests for all of the following.
+The Rust SIA VM must implement:
+
+- current privilege mode;
+- all baseline privileged registers;
+- trap entry;
+- `SRET` and `SRETCTX`;
+- the `SIA32-MMU` page-table walker and translation-cache semantics;
+- page/access faults;
+- translation fences;
+- interrupt pending/enable behavior;
+- physical bus with ROM/RAM/MMIO distinction;
+- timer/external-interrupt injection from the platform model.
+
+Normal Cosmic execution must not depend on host semihosting for machine services.
+
+---
+
+# 21. FPGA/reference-model requirements
+
+The Rust VM is the architectural reference for later RTL/FPGA implementations.
+
+Differential tests must compare at least:
+
+- trap PC and cause;
+- privilege transitions;
+- `SRET`/`SRETCTX` behavior;
+- `VMCTX` installation;
+- page-table walks;
+- ASID/global translation matching;
+- page-size handling;
+- permission failures;
+- translation fences;
+- interrupt acceptance;
+- physical access faults.
+
+Microarchitecture remains free to choose TLB organization, page-walk implementation, cache topology, and internal pipelines.
+
+---
+
+# 22. Conformance tests
+
+Before `SIA32-P` is frozen, test at least:
 
 ## Privilege
 
 - User ordinary instruction succeeds.
-- User privileged instruction faults.
+- User privileged instruction raises `PRIVILEGE`.
 - Supervisor privileged instruction succeeds.
-- User cannot access supervisor-only page.
-- Supervisor respects R/W/X permissions.
+- User cannot access supervisor-only mapping.
 
-## Trap entry
+## Trap entry/return
 
 - every synchronous cause records correct `EPC`;
-- `TRAP` records immediate;
-- `BADADDR` is correct for each address fault;
-- previous mode is recorded correctly;
-- interrupts become disabled on entry;
-- `TVEC` receives control.
+- interrupt `EPC` resumes the next instruction;
+- `TRAP` immediate is preserved;
+- `BADADDR` is correct;
+- `IE/PIE/PP` transitions are correct;
+- `SRET` restores the expected state;
+- `SRETCTX` installs the complete new context without flushing translations;
+- a fault on the first post-`SRETCTX` fetch traps normally under the new context.
 
-## Trap return
+## MMU/context
 
-- return to User;
-- return to Supervisor;
-- previous interrupt state restored;
-- correct `EPC` resume behavior.
-
-## Paging
-
-- valid mapping;
-- invalid L1;
-- invalid L0;
-- user permission failure;
-- read permission failure;
-- write permission failure;
-- execute permission failure;
-- page-table physical access failure;
-- physical target access failure;
-- ASID separation;
-- global mapping behavior.
-
-## Translation synchronization
-
-- stale translation may persist before required fence;
-- `TLBFENCE` removes stale behavior;
-- `TLBFENCE.VA` affects selected virtual page;
-- `TLBFENCE.ASID` affects selected address space;
-- page-table stores are ordered before post-fence translation.
-
-## Interrupts
-
-- pending disabled interrupt does not trap;
-- enabled pending interrupt traps;
-- global `IE` masks all maskable interrupts;
-- synchronous fault still traps with `IE=0`;
-- timer cause is correct;
-- external cause is correct;
-- interrupt `EPC` resumes next instruction.
+- 2 KiB leaf translation;
+- 1 MiB superpage translation;
+- 12-bit ASID separation;
+- `G=1` mapping survives arbitrary `VMCTX` changes;
+- `SWRITE VMCTX` never destroys unrelated TLB entries;
+- ASID recycling requires explicit invalidation;
+- selective `TLBFENCE` operations remove stale translations as specified.
 
 ## Trap stack transition
 
-- `SSWAP sp,SCRATCH` safely exchanges user/kernel stacks;
-- user cannot modify `SCRATCH`;
-- nested supervisor trap rules are deterministic.
+- `SSWAP sp,SCRATCH` safely exchanges user and kernel stacks;
+- User mode cannot modify `SCRATCH`;
+- nested Supervisor-trap behavior is deterministic.
 
 ---
 
-# 38. Design references
+# 23. Remaining freeze work
 
-Useful external architectural references for this design include:
+The privileged **semantics** are now substantially defined.
 
-- ARM Architecture Reference Manual, especially the classic privilege/exception mode and CPSR/SPSR model.
-- MIPS32 Privileged Resource Architecture, especially Status, Cause, EPC, BadVAddr and TLB/exception concepts.
-- RISC-V Privileged Architecture, especially U/S privilege, `satp`, `stvec`, `sepc`, `scause`, `stval`, `sscratch`, `sstatus`, and `SFENCE.VMA`.
-- seL4 architecture and porting documentation for the practical hardware mechanisms required by a capability microkernel.
+Remaining v1 work is primarily:
 
-The SIA architecture intentionally adopts mechanisms selectively rather than reproducing any of these designs.
-
----
-
-# 39. Summary
-
-The complete baseline privileged model is deliberately small:
-
-```text
-Privilege:
-    User
-    Supervisor
-
-Trap state:
-    STATUS
-    TVEC
-    EPC
-    CAUSE
-    BADADDR
-    SCRATCH
-
-Virtual memory:
-    VMROOT
-    ASID
-    4 KiB pages
-    two-level 10/10/12 page tables
-    R W X U G permissions
-    explicit TLBFENCE operations
-
-Interrupts:
-    global enable
-    class enable/pending
-    software
-    timer
-    external
-
-Control:
-    SREAD
-    SWRITE
-    SSWAP
-    SRET
-    WFI
-```
-
-This is enough machinery to build Cosmic as a seL4-style capability microkernel without turning the SIA CPU into an operating-system policy engine.
+- freeze binary encodings including `SRETCTX` and `VMCTX` register ID;
+- freeze the complete SIA32-I opcode map;
+- implement conformance tests in the Rust VM;
+- freeze the SIA ABI;
+- freeze the SIA Platform Specification required for boot and interrupts.
