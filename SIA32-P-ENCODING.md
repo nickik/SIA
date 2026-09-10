@@ -1,33 +1,27 @@
-# SIA32-P Encoding Proposal
+# SIA32-P Encoding
 
 ## Status
 
-- Purpose: proposed binary encoding for `SIA32-P` and related system/memory operations
-- Privilege semantics: [`SIA32-P.md`](SIA32-P.md)
+- Target base: frozen SIA32-I VM baseline
+- Semantics: [`SIA32-P.md`](SIA32-P.md)
 - MMU semantics: [`SIA32-MMU.md`](SIA32-MMU.md)
 - Memory model: [`SIA32-MEM.md`](SIA32-MEM.md)
-- Status: **proposal for the v1 encoding freeze**
+- Status: **implementation baseline; binary freeze follows executable P conformance**
 
-The objective is to encode the complete protected-system architecture without disturbing the dense ordinary SIA32-I user instruction set.
-
-The recommended approach uses the already-reserved primary opcode `0xF` as a compact **SYSTEM/EXT** primary.
+SIA32-I freezes primary `0xD` as ADC and `0xE` as SBB. Bare SIA32-I treats primary `0xF` as illegal. SIA32-P defines the compatible SYSTEM namespace inside `0xF`.
 
 ---
 
-# 1. Top-level primary allocation
-
-Recommended v1 direction:
+# 1. Top-level allocation
 
 ```text
-0x0..0xC   existing ordinary SIA32-I groups
+0x0..0xC   frozen SIA32-I groups
 0xD        ADC rd,rs,rc
 0xE        SBB rd,rs,rc
-0xF        SYSTEM / standard-extension primary
+0xF        SYSTEM / standard-extension primary when SIA32-P is present
 ```
 
-`TRAP`, `BREAK`, and `NOP` remain in the existing `0xC` misc/system subspace.
-
-No ordinary user opcode needs to move.
+`TRAP`, `BREAK`, and `NOP` remain in the frozen `0xC` misc/system subspace.
 
 ---
 
@@ -41,11 +35,11 @@ No ordinary user opcode needs to move.
     4 bits          4 bits          4 bits         4 bits
 ```
 
-Interpretation of `R` and `X` depends on `SYSOP`.
+`R` and `X` are interpreted by SYSOP.
 
 ---
 
-# 3. SYSTEM opcode allocation
+# 3. SYSOP allocation
 
 ```text
 SYSOP    Meaning
@@ -62,13 +56,27 @@ SYSOP    Meaning
 0xF      LONG-EXT escape
 ```
 
-Only half of the compact SYSTEM groups are consumed initially.
+---
+
+# 4. System-register namespace
+
+```text
+ID    Register     Access
+--    --------     -----------------------------------------
+0x0   STATUS       S read/write
+0x1   EPC          S read/write
+0x2   CAUSE        S read-only; hardware trap state
+0x3   BADADDR      S read-only; hardware fault address
+0x4   SCRATCH      S read/write; SSWAP permitted
+0x5   VMCTX        S read/write; root + 12-bit ASID
+0x6-F reserved
+```
+
+There is no selector for TVEC, VMROOT, ASID, IENABLE, or IPENDING.
 
 ---
 
-# 4. System-register operations
-
-## 4.1 `SREAD`
+# 5. SREAD
 
 ```text
 F 0 rd sr
@@ -78,128 +86,84 @@ F 0 rd sr
 rd = system_register[sr]
 ```
 
-## 4.2 `SWRITE`
+A reserved selector is illegal in Supervisor mode.
+
+---
+
+# 6. SWRITE
 
 ```text
 F 1 rs sr
 ```
 
 ```text
-system_register[sr] = rs
+system_register[sr] = old rs
 ```
 
-## 4.3 `SSWAP`
+Legal destinations:
+
+```text
+STATUS
+EPC
+SCRATCH
+VMCTX
+```
+
+Writes to CAUSE, BADADDR, or reserved selectors are illegal in Supervisor mode.
+
+STATUS reserved bits are ignored and read zero as defined by SIA32-P.
+
+A STATUS or VMCTX change becomes architectural at instruction retirement; subsequent fetch/translation observes the new state.
+
+---
+
+# 7. SSWAP
 
 ```text
 F 2 rg sr
 ```
 
 ```text
-t = rg
+t = old rg
 rg = system_register[sr]
 system_register[sr] = t
 ```
 
-Baseline `SIA32-P` permits `SSWAP` only for `SCRATCH`.
+Baseline SIA32-P permits only:
+
+```text
+sr = SCRATCH (0x4)
+```
+
+All other SSWAP selectors are illegal in Supervisor mode.
 
 ---
 
-# 5. Simplified system-register namespace
+# 8. Return-control group
 
-The entire baseline privileged register set is six 32-bit registers:
-
-```text
-ID    Register     Access
---    --------     -----------------------------------------
-0x0   STATUS       S read/write
-0x1   EPC          S read/write
-0x2   CAUSE        S read-only; hardware trap state
-0x3   BADADDR      S read-only; hardware fault state
-0x4   SCRATCH      S read/write; SSWAP permitted
-0x5   VMCTX        S read/write; root + 12-bit ASID
-0x6   reserved
-0x7   reserved
-0x8   reserved
-0x9   reserved
-0xA   reserved
-0xB   reserved
-0xC   reserved
-0xD   reserved
-0xE   reserved
-0xF   reserved
-```
-
-There is no system-register ID for:
-
-```text
-TVEC
-VMROOT
-ASID
-IENABLE
-IPENDING
-```
-
-The trap vector is fixed by the platform profile.
-
-Interrupt pending, masking, priority, claim, and complete state is MMIO state in the platform interrupt controller.
-
-`VMROOT` and `ASID` are fields of `VMCTX` only.
-
----
-
-# 6. `VMCTX`
-
-```text
-31                    12 11                               0
-+-----------------------+----------------------------------+
-| root physical >> 12   |              ASID                |
-|       20 bits         |             12 bits              |
-+-----------------------+----------------------------------+
-```
-
-Writing `VMCTX` installs both fields together and never flushes cached translations merely because the active context changes.
-
----
-
-# 7. Return-control group
-
-## 7.1 `SRET`
+## 8.1 SRET
 
 ```text
 F 3 0 0
 ```
 
-Returns using the current `VMCTX`.
+Before any return-state change, old EPC must be 2-byte aligned. Odd EPC raises INSTRUCTION_ALIGNMENT as specified by SIA32-P.
 
-## 7.2 `SRETCTX rs`
+## 8.2 SRETCTX
 
 ```text
 F 3 rs 1
 ```
 
-Semantics:
+`rs` supplies the complete new VMCTX value. Its GPR value is captured before any architectural state change.
 
-```text
-VMCTX = rs
-restore previous privilege/interrupt state
-PC = EPC
-```
+Old EPC must be 2-byte aligned before VMCTX or return state changes.
 
-The operation:
-
-- installs new root + ASID together;
-- never flushes the TLB merely because the context changes;
-- preserves global translations;
-- serializes subsequent translation under the new context;
-- does not perform a data `FENCE`;
-- does not imply `SYNC.I`;
-- does not pre-walk or pre-validate `EPC`.
-
-All other `F3rx` encodings remain reserved.
+All other `F3rx` encodings are reserved.
 
 ---
 
-# 8. Translation-fence group
+# 9. Translation-fence group
 
 ```text
 F 4 rs mode
@@ -215,25 +179,31 @@ mode    Operation               Register field
 0x4-F   reserved
 ```
 
-`TLBFENCE*` is used for mapping changes and ASID recycling, not ordinary `VMCTX` switches.
+For `TLBFENCE`, nonzero `rs` is a reserved encoding rather than an ignored field.
+
+`TLBFENCE*` synchronizes mapping changes/ASID reuse; it is not part of ordinary VMCTX switching.
 
 ---
 
-# 9. Other system operations
+# 10. WFI / SYNC.I / FENCE
+
+Exactly defined no-operand encodings:
 
 ```text
-F500    WFI        privileged wait/platform-interrupt hint
-F600    SYNC.I     unprivileged instruction-fetch synchronization
-F700    FENCE      unprivileged full data-memory barrier
+F500    WFI        privileged
+F600    SYNC.I     unprivileged
+F700    FENCE      unprivileged
 ```
 
-`WFI` waits on the platform interrupt condition conceptually; it has no dependency on CPU-resident pending registers because none exist.
+Unused operand fields must be zero. Other encodings in those SYSOP groups are reserved.
+
+`WFI` does not enable interrupts and depends only on the platform interrupt condition, not CPU-resident pending registers.
 
 ---
 
-# 10. Long-extension escape
+# 11. Long-extension escape
 
-Reserve:
+Reserve SYSOP `0xF`:
 
 ```text
 first halfword
@@ -257,11 +227,11 @@ Shorthand:
 FFcc xxxx
 ```
 
-A baseline CPU with no long extensions raises `ILLEGAL_INSTRUCTION` on this prefix.
+No long extension is defined by baseline SIA32-P. Executing `FFxx` therefore raises ILLEGAL_INSTRUCTION until a separately specified extension assigns that class.
 
 ---
 
-# 11. Privilege behavior
+# 12. Privilege/decode priority
 
 Privileged operations:
 
@@ -275,95 +245,74 @@ TLBFENCE*
 WFI
 ```
 
-Executing one in User mode raises `PRIVILEGE`.
-
-Unprivileged SYSTEM-space operations:
+Unprivileged operations:
 
 ```text
 SYNC.I
 FENCE
 ```
 
-Reserved/invalid encodings executed in Supervisor mode raise `ILLEGAL_INSTRUCTION`.
+Decode rules:
 
-Writes to `CAUSE`, `BADADDR`, or reserved system-register IDs are illegal instructions.
+1. Determine whether the 16-bit word is a structurally defined instruction encoding.
+2. A structurally reserved encoding raises ILLEGAL_INSTRUCTION in either mode.
+3. For a structurally defined privileged instruction, User mode raises PRIVILEGE.
+4. In Supervisor mode, selector/access restrictions are then checked; violations raise ILLEGAL_INSTRUCTION.
 
----
-
-# 12. Reserved-field rule
-
-Unused operand fields in defined no-operand instructions must be zero.
-
-```text
-F300    SRET
-F500    WFI
-F600    SYNC.I
-F700    FENCE
-```
-
-Other encodings remain reserved for compatible growth.
+This gives deterministic behavior for cases such as a valid SREAD form using a reserved system-register selector.
 
 ---
 
-# 13. Baseline privileged instruction inventory
-
-The first Cosmic-capable CPU needs only:
-
-```text
-kernel entry             TRAP imm8
-system-state read        SREAD
-system-state write       SWRITE
-safe stack exchange      SSWAP SCRATCH
-return                    SRET
-fast context return       SRETCTX
-translation sync          TLBFENCE*
-idle                      WFI
-instruction sync          SYNC.I    unprivileged
-data-memory barrier       FENCE     unprivileged
-```
-
-Not required:
-
-```text
-trap-vector register
-CPU interrupt pending register
-CPU interrupt mask register
-separate IRQ-return instruction
-separate syscall instruction
-physical load/store opcodes
-cache clean/invalidate opcodes
-banked-register operations
-page-map/unmap instructions
-capability instructions
-process/thread instructions
-special device I/O instructions
-```
-
----
-
-# 14. Proposed v1 system encoding summary
+# 13. Exact summary
 
 ```text
 primary D
-    ADC rd,rs,rc
+    Ddrs    ADC rd,rs,rc     ; three 4-bit register fields
 
 primary E
-    SBB rd,rs,rc
+    Edrs    SBB rd,rs,rc
 
 primary F
-    F0rs    SREAD
-    F1rs    SWRITE
-    F2rs    SSWAP              baseline: SCRATCH only
+    F0ds    SREAD  rd,sr
+    F1ss    SWRITE sr,rs
+    F2gs    SSWAP  rg,sr      ; baseline sr=SCRATCH only
+
     F300    SRET
     F3r1    SRETCTX r
-    F4r0    TLBFENCE           r must be 0
+
+    F400    TLBFENCE
     F4r1    TLBFENCE.VA r
     F4r2    TLBFENCE.ASID r
+
     F500    WFI
-    F600    SYNC.I             unprivileged
-    F700    FENCE              unprivileged
+    F600    SYNC.I
+    F700    FENCE
+
     F8xx-FExx reserved
-    FFcc    long-extension prefix/class
+    FFxx    long-extension escape, currently unassigned
 ```
 
-This is the recommended direction for the final SIA v1 opcode freeze.
+The shorthand letters above are descriptive, not additional encoding fields; the authoritative bit positions are the compact SYSTEM format in section 2.
+
+---
+
+# 14. Binary-freeze gate
+
+The SIA32-P encoding should be declared frozen only after the Rust VM executes assembly-driven conformance tests for:
+
+```text
+privilege faults
+all six system-register selectors
+reserved selectors
+read-only register writes
+SSWAP restriction
+TRAP/BREAK trap entry
+SRET/SRETCTX including odd EPC
+STATUS/VMCTX serialization
+reserved F encodings
+FENCE/SYNC.I User execution
+WFI privilege behavior
+TLBFENCE forms once MMU exists
+```
+
+Until then, this document is the implementation baseline and should not be changed casually, but SIA32-P is not yet labeled an immutable binary freeze.
