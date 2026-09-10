@@ -15,6 +15,14 @@ SIA is DEC's compact scalable RISC architecture for the Vision 2000 system famil
 - [`SIA-PLATFORM.md`](SIA-PLATFORM.md) — machine/platform contract: fixed reset/trap vectors, physical memory, platform-owned interrupt controller, timer, firmware, PLIO integration, discovery, and the first `Lighting-1` profile.
 - [`TODO.md`](TODO.md) — ordered architecture-completion checklist.
 
+## Executable implementation
+
+The Rust executable reference implementation has moved to [`nickik/LightingSimulation`](https://github.com/nickik/LightingSimulation).
+
+`LightingSimulation` is now the canonical home of `siaemu`, executable SIA32-I encoding helpers, and the SIA32-I conformance suite. The SIA repository remains the architecture/specification repository.
+
+Privilege and platform execution are intentionally gated until the SIA32-I interpreter and tests are stable.
+
 ## Architecture model
 
 The CPU architecture remains intentionally separate from platform facilities.
