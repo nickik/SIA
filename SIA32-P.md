@@ -3,30 +3,30 @@
 ## Status
 
 - Extension: **SIA32-P**
-- Target base: `SIA32-I`
+- Target base: frozen `SIA32-I` VM baseline
 - Purpose: protected operating systems, traps, interrupts, system control, and MMU control
 - Required by Lighting/Cosmic: **YES**
 - Initial target: single-processor Lighting system
 - MMU semantics: [`SIA32-MMU.md`](SIA32-MMU.md)
 - Memory ordering: [`SIA32-MEM.md`](SIA32-MEM.md)
 - Platform contract: [`SIA-PLATFORM.md`](SIA-PLATFORM.md)
+- Binary encoding: [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md)
 
-`SIA32-P` defines the minimum privileged CPU state needed by Cosmic.
+`SIA32-P` defines the minimum privileged CPU mechanism required by Cosmic. It deliberately excludes kernel policy, platform interrupt-source state, device abstractions, and scheduler objects.
 
-The design deliberately keeps platform facilities out of the CPU. In particular, interrupt pending bits, interrupt masks, source priorities, timer state, software-interrupt state, and device-interrupt identification belong to the **SIA Platform interrupt controller**, not to privileged CPU registers.
-
-The core privilege model is:
+The privilege model is exactly:
 
 ```text
-User mode
+User mode (U)
     |
-    | trap / exception / platform interrupt
+    | synchronous trap / exception
+    | asynchronous platform interrupt
     v
-Supervisor mode
+Supervisor mode (S)
     |
-    | SRET or SRETCTX
+    | SRET / SRETCTX
     v
-User mode
+previous U or S context
 ```
 
 There are exactly two architectural privilege levels:
@@ -36,111 +36,112 @@ U   User
 S   Supervisor
 ```
 
-There is no separate machine, hypervisor, IRQ, abort, undefined-instruction, or firmware privilege mode in the baseline.
+There is no machine, hypervisor, IRQ, abort, undefined-instruction, or firmware privilege mode in the baseline.
 
 ---
 
 # 1. Design goals
 
-`SIA32-P` is designed for:
+SIA32-P is designed for:
 
-- a small capability microkernel;
 - strict User/Supervisor isolation;
-- precise exceptions;
-- very fast system calls and IPC;
-- asynchronous platform interrupts;
-- timer-driven preemption through the platform interrupt controller;
-- user-level system services and drivers;
+- precise synchronous exceptions;
+- very fast trap entry and IPC handoff;
+- one simple CPU-level asynchronous interrupt gate;
 - protected virtual memory through `SIA32-MMU`;
-- protected DMA through platform facilities such as PLIO;
-- deterministic implementation in the Rust full-system VM;
-- straightforward FPGA/custom implementation;
-- future SMP use with `SIA32-A` plus platform SMP facilities.
+- user-level drivers and system services;
+- deterministic implementation in the Rust VM;
+- straightforward implementation from small silicon through larger custom CPUs;
+- future SMP without adding baseline privileged-register clutter.
 
-A major performance objective is that an IPC handoff between two address spaces whose translations are already cached requires **no TLB flush**.
-
-The privileged CPU state should remain small, explicit, and free of hidden banked integer registers.
+A key performance objective is that switching between two address spaces whose translations are already cached requires **no TLB flush**.
 
 ## 1.1 Non-goals
 
 The baseline does not define:
 
-- processes or thread objects;
-- capabilities or IPC endpoint objects;
-- scheduler policy;
-- filesystem or POSIX abstractions;
-- device classes or DMA descriptor formats;
-- interrupt-controller source tables;
-- timer registers;
-- hardware virtualization;
-- banked general-purpose registers;
-- software-filled TLBs as the mandatory paging interface.
+```text
+process/thread objects
+capability or IPC endpoint objects
+scheduler policy
+filesystem/POSIX abstractions
+device classes or DMA descriptors
+interrupt-controller source tables
+CPU-resident interrupt pending/mask bitmaps
+timer registers
+hardware virtualization
+banked general-purpose registers
+software-filled TLBs as the mandatory paging interface
+```
 
 ---
 
 # 2. Privilege levels
 
-## 2.1 User mode (`U`)
+## 2.1 User mode
 
-User mode:
+User mode may:
 
-- executes ordinary unprivileged SIA instructions;
-- accesses only mappings permitted by the current `VMCTX` and PTE permissions;
-- enters Supervisor mode with `TRAP`;
-- may execute explicitly unprivileged system operations such as `FENCE` and `SYNC.I`;
-- may not read or write privileged system registers;
-- may not modify translation state;
-- may not execute privileged return, TLB-management, or wait operations.
+- execute ordinary SIA32-I instructions;
+- access mappings permitted by the current `VMCTX` and page permissions;
+- enter Supervisor mode using architectural `TRAP`;
+- execute explicitly unprivileged SYSTEM operations such as `FENCE` and `SYNC.I`.
 
-Attempting a privileged operation in User mode raises `PRIVILEGE`.
+User mode may not:
 
-## 2.2 Supervisor mode (`S`)
+- read/write privileged system registers;
+- change translation context;
+- execute privileged return/TLB/wait operations.
 
-Supervisor mode is the highest baseline privilege level.
+Executing a structurally valid privileged instruction in User mode raises `PRIVILEGE`.
 
-It may:
+## 2.2 Supervisor mode
 
-- read/write permitted privileged system registers;
-- install an MMU context;
+Supervisor mode may:
+
+- read/write permitted privileged registers;
+- install `VMCTX`;
 - change page tables in ordinary memory;
-- synchronize cached translations;
-- map physical memory and MMIO through page tables;
-- globally enable/disable asynchronous interrupt acceptance through `STATUS.IE`;
-- access the platform interrupt controller through MMIO;
+- synchronize translation state;
+- globally gate maskable asynchronous interrupt acceptance through `STATUS.IE`;
+- access platform controllers through ordinary MMIO mappings;
 - return to User or Supervisor execution.
 
-Supervisor mode does not automatically bypass page `R/W/X` permissions while translation is enabled.
+While translation is enabled, Supervisor ignores the PTE `U` bit but still obeys `R/W/X` permissions.
 
 ---
 
 # 3. Reset state
 
-On architectural reset:
+Architectural reset is deterministic:
 
 ```text
-mode            = S
-STATUS.IE       = 0
-STATUS.VM       = 0
-PC              = platform RESET_VECTOR
+mode        = S
+STATUS      = 0
+EPC         = 0
+CAUSE       = 0
+BADADDR     = 0
+SCRATCH     = 0
+VMCTX       = 0
+PC          = platform RESET_VECTOR
 ```
 
-Translation is initially disabled, so firmware begins with physical addressing.
+Therefore initially:
 
-The SIA Platform Specification defines:
+```text
+STATUS.IE = 0
+STATUS.VM = 0
+```
 
-- `RESET_VECTOR`;
-- `TRAP_VECTOR`;
-- ROM and RAM layout;
-- MMIO layout;
-- interrupt controller;
-- monotonic timer;
-- device discovery and platform identification.
+Firmware begins in Supervisor mode with physical addressing.
+
+`RESET_VECTOR`, `TRAP_VECTOR`, ROM/RAM/MMIO layout, the interrupt controller, timer, and device-discovery mechanisms are platform definitions rather than SIA32-P registers.
 
 ---
 
-# 4. Privileged system state
+# 4. Privileged architectural state
 
-The complete baseline privileged register set is only **six 32-bit registers**:
+The complete baseline privileged register set is exactly six 32-bit registers:
 
 ```text
 ID    Register     Access      Purpose
@@ -148,13 +149,13 @@ ID    Register     Access      Purpose
 0x0   STATUS       S read/write execution, previous-state and VM control
 0x1   EPC          S read/write saved exception/interrupt return PC
 0x2   CAUSE        S read-only  trap/interrupt cause written by hardware
-0x3   BADADDR      S read-only  faulting address where applicable
-0x4   SCRATCH      S read/write software trap scratch; SSWAP permitted
+0x3   BADADDR      S read-only  faulting address written by hardware
+0x4   SCRATCH      S read/write software trap scratch; SSWAP target
 0x5   VMCTX        S read/write page-table root + 12-bit ASID
 0x6-F reserved
 ```
 
-All six are ordinary 32-bit architectural registers. The 4-bit `0x0..0xF` values are only identifiers used by `SREAD`, `SWRITE`, and `SSWAP` encodings.
+Current privilege `U/S` is separate architectural processor state, not a field directly writable by software.
 
 There is deliberately no architectural:
 
@@ -166,36 +167,116 @@ IENABLE
 IPENDING
 ```
 
-`TVEC` is replaced by the platform-defined fixed `TRAP_VECTOR`.
-
-`VMROOT` and `ASID` are fields of `VMCTX` and cannot be independently installed.
-
-Interrupt pending/mask/source state belongs to the platform interrupt controller.
+The trap vector is fixed by the platform profile. Root and ASID are fields of `VMCTX`. Source-specific interrupt state belongs to the platform interrupt controller.
 
 ---
 
-# 5. System-register instructions
+# 5. STATUS
+
+```text
+bit 0      IE       global asynchronous-interrupt enable
+bit 1      PIE      saved previous IE
+bit 2      PP       previous privilege: 0=U, 1=S
+bit 3      VM       virtual-memory translation enable
+bits 4..31          reserved
+```
+
+Reserved STATUS bits read as zero. In this baseline, writes to reserved bits are ignored; software should write them as zero for forward compatibility.
+
+Writing STATUS does **not** directly change current privilege.
+
+## 5.1 IE
+
+`IE` is the only CPU-resident mask for maskable asynchronous interrupts.
+
+An asynchronous platform interrupt is eligible when:
+
+```text
+STATUS.IE = 1
+AND
+platform interrupt condition = asserted
+```
+
+When `IE=0`, the CPU does not take the interrupt. The CPU does not consume or clear the platform condition; pending/source state remains a platform-controller responsibility.
+
+Synchronous exceptions are unaffected by `IE`.
+
+## 5.2 PIE and PP
+
+Trap entry records old `IE` into `PIE` and old privilege into `PP`.
+
+There is one hardware trap-save level. If Supervisor software intentionally enables nested traps, it must first save `EPC`, `CAUSE`, `BADADDR` when relevant, `STATUS`, and other needed state in memory.
+
+## 5.3 VM
+
+```text
+VM=0   instruction/data addresses are physical
+VM=1   instruction/data accesses use SIA32-MMU and VMCTX
+```
+
+`SWRITE STATUS,rs` executes entirely under the old STATUS. The new value becomes architectural at retirement. Therefore a changed `VM` bit affects the **next** instruction fetch and subsequent accesses, not the instruction performing the write.
+
+A change to `IE` similarly becomes effective at retirement; an already asserted platform interrupt may be taken at the next asynchronous interrupt boundary.
+
+Changing `VM` does not by itself flush translation state.
+
+---
+
+# 6. VMCTX
+
+`VMCTX` is the only architectural address-space context register:
+
+```text
+31                    12 11                               0
++-----------------------+----------------------------------+
+| root physical >> 12   |              ASID                |
+|       20 bits         |             12 bits              |
++-----------------------+----------------------------------+
+```
+
+```text
+root physical address = VMCTX[31:12] << 12
+ASID                  = VMCTX[11:0]
+```
+
+The root is 4 KiB aligned.
+
+`SWRITE VMCTX,rs` executes using the old translation context. The new root+ASID becomes architectural together at retirement. The next translated fetch/data access uses the new context.
+
+A VMCTX write:
+
+- never exposes a mixed old-root/new-ASID state;
+- never invalidates cached translations merely because the context changed;
+- serializes subsequent translation so stale prefetched instructions from the old context may not retire after the switch;
+- is not a general data-memory `FENCE`;
+- does not imply `SYNC.I`.
+
+Full translation semantics are normative in `SIA32-MMU.md`.
+
+---
+
+# 7. System instructions
 
 SIA32-P defines:
 
-```asm
-SREAD  rd, sr          ; rd = system_register[sr]
-SWRITE sr, rs          ; system_register[sr] = rs
-SSWAP  rd, sr          ; exchange GPR and swap-safe system register
+```text
+SREAD  rd,sr
+SWRITE sr,rs
+SSWAP  rg,sr
 
-SRET                   ; return using current VMCTX
-SRETCTX rs             ; install VMCTX from rs and return
+SRET
+SRETCTX rs
 
-TLBFENCE               ; synchronize/invalidate all required local translations
-TLBFENCE.VA rs          ; synchronize translation for virtual address
-TLBFENCE.ASID rs        ; synchronize non-global translations for ASID
+TLBFENCE
+TLBFENCE.VA rs
+TLBFENCE.ASID rs
 
-WFI                    ; wait-for-platform-interrupt hint
+WFI
 ```
 
-`FENCE` and `SYNC.I` use SYSTEM encoding space but are unprivileged and specified by `SIA32-MEM`.
+`FENCE` and `SYNC.I` share SYSTEM encoding space but are unprivileged and are specified by `SIA32-MEM`.
 
-## 5.1 Register access
+## 7.1 System-register access
 
 ```text
 STATUS      read/write
@@ -206,250 +287,152 @@ SCRATCH     read/write
 VMCTX       read/write
 ```
 
-Writing a read-only or reserved system-register ID in Supervisor mode raises `ILLEGAL_INSTRUCTION`.
+Supervisor writes to `CAUSE`, `BADADDR`, or a reserved system-register selector raise `ILLEGAL_INSTRUCTION`.
 
-## 5.2 `SSWAP`
+A read of a reserved system-register selector in Supervisor mode raises `ILLEGAL_INSTRUCTION`.
 
-The baseline permits `SSWAP` only with `SCRATCH`.
+For a structurally valid privileged instruction, privilege checking occurs before register-access permission checking. Thus the same SREAD/SWRITE form executed in User mode raises `PRIVILEGE`; a structurally reserved SYSTEM encoding raises `ILLEGAL_INSTRUCTION` in either mode because it is not a defined privileged instruction.
 
-The intended trap-stack transition is:
+## 7.2 SSWAP
+
+Baseline SIA32-P permits `SSWAP` only with `SCRATCH`:
+
+```text
+t = rg
+rg = SCRATCH
+SCRATCH = t
+```
+
+The intended entry sequence is:
 
 ```asm
-SSWAP sp, SCRATCH
+SSWAP sp,SCRATCH
 ```
 
-When User mode was running:
-
-```text
-before:
-    sp      = user stack pointer
-    SCRATCH = CPU/kernel stack pointer
-
-after:
-    sp      = CPU/kernel stack pointer
-    SCRATCH = saved user stack pointer
-```
-
-This provides the useful part of banked exception-stack state with one explicit word rather than hidden banked GPRs.
+allowing one explicit per-CPU/kernel stack pointer without hidden banked GPRs.
 
 ---
 
-# 6. `STATUS`
+# 8. Fixed TRAP_VECTOR
 
-`STATUS` is 32 bits:
+SIA32-P has no writable trap-vector register.
 
-```text
-bit 0      IE       global asynchronous-interrupt enable
-bit 1      PIE      saved previous IE
-bit 2      PP       previous privilege (0=U, 1=S)
-bit 3      VM       virtual-memory translation enable
-bits 4..31          reserved; read as zero until assigned
-```
-
-The current privilege mode is architectural processor state, not a directly writable field.
-
-## 6.1 `IE`
-
-`IE` is the **only CPU-resident interrupt mask**.
-
-When:
+Every platform profile defines a fixed architectural address:
 
 ```text
-STATUS.IE = 1
-AND
-platform interrupt condition = asserted
+TRAP_VECTOR
 ```
 
-the CPU may take the asynchronous platform interrupt at an architecturally valid interrupt boundary.
+All synchronous exceptions, architectural `TRAP`, `BREAK`, and asynchronous platform interrupts enter at this same address.
 
-When `IE=0`, the CPU does not take maskable asynchronous interrupts. Pending sources remain recorded by the platform interrupt controller; they are not lost merely because CPU interrupt acceptance is disabled.
+Requirements:
 
-Synchronous exceptions are unaffected by `IE`.
+- `TRAP_VECTOR` is 2-byte aligned;
+- with `VM=0`, it is interpreted as a physical address;
+- with `VM=1`, it is interpreted as a virtual address under the current `VMCTX`;
+- protected software must map it identically in every active address space, normally supervisor-only, executable, and `G=1`;
+- the platform profile must provide compatible physical-mode firmware backing at the same numerical address.
 
-## 6.2 `PIE` and `PP`
+Trap entry does not disable VM or replace VMCTX.
 
-Trap entry automatically records the previous interrupt-enable state and privilege level in `PIE` and `PP`.
-
-There is one architectural hardware save level. A kernel that deliberately allows nested traps must save `EPC`, `CAUSE`, `STATUS`, and other required state before re-enabling `IE`.
-
-## 6.3 `VM`
-
-When `VM=0`, ordinary instruction and data addresses are physical addresses.
-
-When `VM=1`, instruction and data accesses use `VMCTX` under `SIA32-MMU`.
-
-Changing `VMCTX` does **not** flush the TLB.
+If the CPU cannot fetch the first instruction at `TRAP_VECTOR` after completing trap entry, this is a **trap-entry failure**, not an ordinary recursively reported guest exception. The architectural CPU state from the original trap remains valid for diagnosis. The platform profile determines whether hardware then halts, resets, or enters implementation-defined fatal handling.
 
 ---
 
-# 7. `VMCTX`
+# 9. Precise execution and exception priority
 
-`VMCTX` is the only architectural address-space context register.
+Synchronous exceptions are detected as part of the current instruction before that instruction commits architectural effects.
+
+Conceptually:
 
 ```text
-31                    12 11                               0
-+-----------------------+----------------------------------+
-| root physical >> 12   |              ASID                |
-|       20 bits         |             12 bits              |
-+-----------------------+----------------------------------+
+fetch/decode current instruction
+    -> evaluate/check synchronous faults
+    -> commit instruction effects
+    -> retire
+    -> consider asynchronous platform interrupt
 ```
 
 Therefore:
 
-```text
-root physical address = VMCTX[31:12] << 12
-ASID                  = VMCTX[11:0]
-```
+- a synchronous exception from the current instruction takes priority over an asynchronous platform interrupt asserted during that instruction;
+- asynchronous interrupts are taken only between retired instructions;
+- the interrupt EPC is the next instruction that would have executed.
 
-The root is 4 KiB aligned even though normal SIA pages are 2 KiB.
+Within a memory instruction, address alignment is checked before translation/access for that architectural constituent. Page/access-fault priority after alignment is defined by `SIA32-MMU` and the platform physical-access model.
 
-`VMROOT` and `ASID` are not architectural aliases. Software extracts or constructs the fields in ordinary GPRs.
-
-Writing `VMCTX` installs root + ASID as one translation-context change and **never invalidates cached translations merely because the context changed**.
-
-Full MMU behavior is defined by `SIA32-MMU.md`.
+Multi-register operations use the all-or-nothing and first-failing-constituent rules in `SIA32-MULTI-TRANSFER.md`.
 
 ---
 
-# 8. Fixed trap vector
-
-SIA32-P has no writable trap-vector register.
-
-Every platform profile defines one fixed architectural address:
-
-```text
-TRAP_VECTOR
-```
-
-All synchronous exceptions, `TRAP` instructions, and asynchronous platform interrupts enter at this same address.
-
-Requirements:
-
-- `TRAP_VECTOR` is at least 2-byte aligned;
-- when `STATUS.VM=0`, it is interpreted as a physical address;
-- when `STATUS.VM=1`, it is interpreted as a virtual address in the current `VMCTX`;
-- a protected OS must therefore map the trap entry identically in every active address space, normally as supervisor-only `G=1` executable memory;
-- the platform profile must make the reset/firmware arrangement compatible with the fixed address in physical mode.
-
-Typical Cosmic policy:
-
-```text
-TRAP_VECTOR
-    -> small globally mapped Cosmic trap entry
-    -> save/dispatch in software
-```
-
-A fixed vector avoids one privileged register and removes a control dependency from trap entry.
-
----
-
-# 9. Trap entry
+# 10. Trap entry
 
 A trap may result from:
 
-- a synchronous exception;
-- `TRAP imm8`;
-- an asynchronous platform interrupt.
+```text
+architectural TRAP imm8
+BREAK
+illegal instruction
+privilege violation
+instruction alignment
+load/store alignment
+page/protection fault
+physical access fault
+checked arithmetic fault
+asynchronous platform interrupt
+```
 
-Trap entry is precise and performs:
+For a synchronous exception at `fault_pc`, trap entry atomically performs:
 
 ```text
-EPC        = saved PC
-CAUSE      = trap reason
-BADADDR    = fault address where defined
-STATUS.PIE = STATUS.IE
-STATUS.PP  = previous privilege
+EPC        = fault_pc
+CAUSE      = encoded cause
+BADADDR    = fault address if this cause defines one; otherwise unchanged
+STATUS.PIE = old STATUS.IE
+STATUS.PP  = old mode
 STATUS.IE  = 0
 mode       = S
 PC         = TRAP_VECTOR
 ```
 
-General-purpose registers and `VMCTX` are unchanged.
+General-purpose registers and VMCTX are unchanged unless the completed instruction before an asynchronous interrupt had changed them normally.
 
-Because `VMCTX` remains installed, Cosmic should keep its trap/kernel mapping global (`G=1`) so trap entry never requires an address-space switch merely to execute kernel code.
+## 10.1 TRAP
 
-## 9.1 Saved PC semantics
+For `TRAP imm8`:
 
-For a synchronous fault, `EPC` identifies the faulting instruction.
+```text
+EPC            = address of TRAP instruction
+CAUSE.INTERRUPT= 0
+CAUSE[15:8]    = imm8
+CAUSE[7:0]     = TRAP
+BADADDR        unchanged
+```
 
-For `TRAP`, `EPC` identifies the `TRAP` instruction. A consumed system call normally advances `EPC` by 2 before return.
+A consumed syscall normally advances saved EPC by 2 in software before `SRET`/`SRETCTX`.
 
-For an asynchronous platform interrupt, `EPC` identifies the next instruction that would otherwise execute.
+## 10.2 BREAK
 
-## 9.2 Trap while already in Supervisor mode
+`BREAK` raises `BREAKPOINT` as a synchronous exception. It is not an implicit host-debug escape in the architectural model.
 
-Supervisor traps use the same mechanism.
+## 10.3 Supervisor traps
 
-Because there is only one hardware save level, software must save trap state before intentionally enabling nesting.
+A trap taken while already in Supervisor mode sets `PP=S`. The same single hardware save level is used; old trap state is overwritten.
 
 ---
 
-# 10. Trap return
+# 11. CAUSE
 
-## 10.1 `SRET`
-
-`SRET` performs:
-
-```text
-mode       = STATUS.PP
-STATUS.IE  = STATUS.PIE
-STATUS.PIE = 1
-STATUS.PP  = U
-PC         = EPC
-```
-
-`VMCTX` is unchanged.
-
-The subsequent instruction fetch is normal; `SRET` does not pre-walk or pre-validate the target mapping.
-
-## 10.2 `SRETCTX rs`
-
-`SRETCTX` is the fast address-space-switch-and-return operation for IPC and scheduling.
-
-Conceptually:
-
-```text
-VMCTX      = rs
-mode       = STATUS.PP
-STATUS.IE  = STATUS.PIE
-STATUS.PIE = 1
-STATUS.PP  = U
-PC         = EPC
-```
-
-Properties:
-
-- privileged;
-- installs the complete 32-bit `VMCTX` atomically;
-- never flushes TLB entries merely because the context changes;
-- preserves global translations;
-- leaves old non-global translations cached under old ASIDs;
-- serializes subsequent translation under the new context;
-- is not a general data-memory `FENCE`;
-- does not imply `SYNC.I`;
-- does not pre-walk or pre-validate `EPC`.
-
-Typical IPC tail:
-
-```asm
-SSWAP   sp, SCRATCH
-SRETCTX r8              ; r8 = receiver VMCTX
-```
-
----
-
-# 11. `CAUSE`
-
-`CAUSE` is 32 bits:
+CAUSE is 32 bits:
 
 ```text
 bit 31      INTERRUPT
-bits 30..16 reserved
+bits 30..16 reserved; written zero
 bits 15..8  auxiliary cause data where defined
 bits 7..0   cause code
 ```
 
-Initial synchronous causes:
+Synchronous cause codes:
 
 ```text
 0x00  ILLEGAL_INSTRUCTION
@@ -468,255 +451,272 @@ Initial synchronous causes:
 0x0D  ARITHMETIC
 ```
 
-For `TRAP imm8`:
+Unless a cause explicitly defines auxiliary information, `CAUSE[15:8]=0`.
 
-```text
-CAUSE.INTERRUPT = 0
-CAUSE[15:8]     = trap immediate
-CAUSE[7:0]      = TRAP
-```
-
-## 11.1 Asynchronous interrupt cause
-
-The baseline defines only one CPU-level asynchronous cause:
+The only baseline asynchronous CPU-level cause is:
 
 ```text
 CAUSE.INTERRUPT = 1
-CAUSE[7:0]      = 0x01   PLATFORM_INTERRUPT
+CAUSE[15:8]     = 0
+CAUSE[7:0]      = 0x01 PLATFORM_INTERRUPT
 ```
 
-The CPU does **not** encode timer/device/software source identity in `CAUSE`.
-
-Cosmic obtains the actual source by reading the platform interrupt controller's `CLAIM` register.
-
-This avoids duplicating source, pending, mask, and priority state in the CPU.
+The actual timer/device/software source is discovered through the platform interrupt controller, not CAUSE.
 
 ---
 
-# 12. `BADADDR`
+# 12. BADADDR
 
-`BADADDR` is written for address-related synchronous faults.
-
-Typical uses:
+BADADDR is hardware-written and deterministic for address-related faults:
 
 ```text
-instruction page/access fault
-load page/access fault
-store page/access fault
-alignment fault where useful
+JALR odd target                    target address
+SRET/SRETCTX odd EPC               attempted return EPC
+instruction-fetch alignment        attempted PC
+instruction page/access fault      attempted instruction virtual address
+load alignment/page/access fault   attempted load virtual address
+store alignment/page/access fault  attempted store virtual address
+multi-transfer address fault       first failing constituent VA in logical order
 ```
 
-For translated CPU accesses it normally records the original architectural virtual address.
+When VM=0, these architectural addresses are physical addresses because VA=PA.
 
-For non-address traps or interrupts, its value is not architecturally meaningful and software must ignore it.
+For `ILLEGAL_INSTRUCTION`, `PRIVILEGE`, `BREAKPOINT`, `TRAP`, `ARITHMETIC`, and `PLATFORM_INTERRUPT`, BADADDR is unchanged from its previous value.
+
+Software must therefore consult CAUSE before interpreting BADADDR.
 
 ---
 
-# 13. Platform interrupt model
+# 13. JALR relationship
 
-The CPU has one conceptual asynchronous interrupt condition from the platform.
+The frozen SIA32-I baseline defines odd `JALR` targets as instruction-alignment faults rather than masking bit 0.
 
-All detailed interrupt machinery is outside SIA32-P:
+Under SIA32-P:
+
+```text
+EPC     = address of faulting JALR
+CAUSE   = INSTRUCTION_ALIGNMENT
+BADADDR = odd target
+```
+
+The link destination is not written and the branch does not occur.
+
+---
+
+# 14. SRET
+
+`SRET` is privileged.
+
+Before changing return state, the CPU checks `EPC` alignment.
+
+If `EPC[0]=1`:
+
+```text
+raise INSTRUCTION_ALIGNMENT at the SRET instruction
+BADADDR = old EPC
+SRET has no architectural return-state effect
+```
+
+Otherwise `SRET` atomically performs:
+
+```text
+mode       = old STATUS.PP
+STATUS.IE  = old STATUS.PIE
+STATUS.PIE = 1
+STATUS.PP  = U
+PC         = old EPC
+VMCTX      unchanged
+```
+
+The return target mapping is **not** pre-walked or prevalidated. If the subsequent instruction fetch fails under the resulting translation state, that fetch raises a normal instruction page/access fault.
+
+---
+
+# 15. SRETCTX
+
+`SRETCTX rs` is the fast address-space-switch-and-return operation.
+
+The CPU captures the old GPR value of `rs` and checks old `EPC` alignment before changing any state.
+
+If `EPC[0]=1`, it raises `INSTRUCTION_ALIGNMENT` exactly as `SRET` does and leaves VMCTX/return state unchanged.
+
+Otherwise it atomically performs:
+
+```text
+VMCTX      = captured old value of rs
+mode       = old STATUS.PP
+STATUS.IE  = old STATUS.PIE
+STATUS.PIE = 1
+STATUS.PP  = U
+PC         = old EPC
+```
+
+Properties:
+
+- root+ASID install together;
+- ordinary address-space switching never flushes the TLB;
+- global translations remain reusable;
+- old non-global translations remain cached under old ASIDs;
+- subsequent translation uses the new VMCTX;
+- it is not a data `FENCE`;
+- it does not imply `SYNC.I`;
+- it does not pre-walk/prevalidate the return mapping.
+
+Typical Cosmic IPC tail:
+
+```asm
+SSWAP   sp,SCRATCH
+SRETCTX r8
+```
+
+---
+
+# 16. Platform interrupt model
+
+The CPU receives one conceptual asynchronous platform interrupt condition:
 
 ```text
 timer deadline
-software interrupt / later IPI
+software interrupt / future IPI
 PLIO Notification
 direct platform device
         |
         v
 platform interrupt controller
     pending
-    per-source mask
+    enable/mask
     priority/routing
     claim
     complete
         |
         v
 single CPU platform-interrupt condition
-        |
-        v
-SIA32-P trap at TRAP_VECTOR
 ```
 
-The controller may continue accumulating pending sources while `STATUS.IE=0`.
+The CPU contains none of the source-specific state above.
 
-A normal handler flow is:
+If the condition remains asserted after a handler completes one source, another interrupt may be taken after `IE` is restored.
 
-```text
-CPU takes PLATFORM_INTERRUPT
-    -> IE automatically becomes 0
-    -> Cosmic saves required trap state
-    -> read controller CLAIM
-    -> service/dispatch source
-    -> write controller COMPLETE
-    -> SRET
-```
-
-If more eligible sources remain pending, the controller keeps/reasserts the platform interrupt condition and another interrupt may be taken after `IE` is restored.
-
-Nested interrupt policy is software/platform policy, not additional CPU state.
+Nested interrupt policy is software/platform policy.
 
 ---
 
-# 14. MMU relationship
+# 17. WFI
 
-All virtual-memory semantics are normative in [`SIA32-MMU.md`](SIA32-MMU.md).
+`WFI` is privileged and is only a power/performance hint.
 
-Required first Lighting profile:
+Architecturally:
 
-```text
-Address space             32-bit
-Normal page               2 KiB
-Superpage                 1 MiB
-ASID                      12 bits / 4096 values
-Page tables               3 levels
-VA                         L2=6, L1=6, L0=9, offset=11
-L1 leaf                   1 MiB superpage
-L0 leaf                   2 KiB page
-VMCTX                     root>>12 (20 bits) + ASID (12 bits)
-root alignment            4 KiB
-SWRITE VMCTX              never flushes TLB
-```
+- it may be implemented as NOP;
+- it never changes `IE`;
+- if an implementation actually waits, it must resume when the platform interrupt condition is asserted even if `IE=0`;
+- an asserted condition is taken as an interrupt only if `IE=1` at the normal interrupt boundary;
+- WFI may not cause platform pending state to be lost.
 
-Recommended global mappings:
-
-```text
-G=1
-    Cosmic kernel
-    TRAP_VECTOR entry
-    universal ROM libraries
-    universal ROM constants
-    universal system/IPC stubs
-```
-
-Recommended ASID-tagged mappings:
-
-```text
-G=0
-    application code
-    heap
-    stack
-    writable globals
-    TLS
-    per-process data
-    non-global shared-memory mappings
-```
-
-SIA32-P does not define separate instruction and data page types. Permissions define use.
+This prevents `WFI` with interrupts disabled from creating an architectural deadlock requirement.
 
 ---
 
-# 15. Page and physical faults
+# 18. MMU relationship
+
+The first Lighting protected profile uses:
+
+```text
+32-bit VA
+2 KiB normal page
+1 MiB superpage
+12-bit ASID
+3-level 6/6/9/11 walk
+VMCTX = root>>12 + ASID
+4 KiB root alignment
+```
+
+Recommended `G=1` mappings include Cosmic kernel code/data where suitable, the fixed TRAP_VECTOR entry, universal ROM libraries/constants, and universal system/IPC stubs.
+
+`SWRITE VMCTX` and `SRETCTX` do not flush translations merely because the active context changed.
+
+Translation details and TLBFENCE behavior are normative in `SIA32-MMU.md`.
+
+---
+
+# 19. Page and physical-access faults
 
 Translation/protection faults are precise:
 
 ```text
 EPC     = faulting instruction
-BADADDR = faulting virtual address
-CAUSE   = corresponding page-fault cause
+BADADDR = faulting architectural address
+CAUSE   = relevant page-fault cause
 ```
 
-The faulting architectural operation has not completed.
+Physical/bus failure after successful translation raises the corresponding `*_ACCESS_FAULT`.
 
-Physical/bus failures after successful translation raise the corresponding `*_ACCESS_FAULT` rather than a page fault.
-
-`LDP/STP/LD4/ST4` use the separate all-or-nothing semantics in `SIA32-MULTI-TRANSFER.md`.
+`LDP/STP/LD4/ST4` retain their separate all-or-nothing rules.
 
 ---
 
-# 16. MMIO and DMA
+# 20. MMIO and DMA
 
-SIA32-P defines no special I/O instructions.
+SIA32-P defines no special I/O instruction.
 
-Devices and platform controllers are MMIO.
+Devices and platform controllers are MMIO. User access exists only when Supervisor software deliberately maps the region.
 
-User software can access an MMIO region only if Supervisor software deliberately maps it.
-
-CPU MMU protection and device DMA authority are separate:
+CPU virtual-memory protection and device DMA authority are independent:
 
 ```text
 CPU translation/protection    SIA32-P + SIA32-MMU
-PLIO DMA authority             platform / PLIO protected DMA
+PLIO DMA authority             SIA Platform / PLIO protected DMA
 ```
 
-For Lighting, PLIO provides bounded protected DMA without requiring a general-purpose IOMMU.
-
-Page-table walks may use only suitable normal coherent RAM, never MMIO.
+Page-table walks use suitable normal coherent RAM, never MMIO.
 
 ---
 
-# 17. `WFI`
-
-`WFI` is a privileged power/performance hint.
-
-Architecturally:
-
-- it may stop instruction issue until the platform interrupt condition becomes asserted;
-- it may be implemented as a `NOP`;
-- it does not enable interrupts;
-- it must not cause a pending interrupt-controller source to be lost.
-
-The Rust VM may use `WFI` to advance virtual time to the next platform event.
-
----
-
-# 18. SMP relationship
+# 21. SMP relationship
 
 The first Lighting profile is single CPU.
 
-A later SMP platform adds:
+A later SMP platform adds coherent memory, per-CPU/routed interrupt conditions, software IPI sources, CPU startup/identity, remote TLB shootdown protocol, and `SIA32-A` atomics.
 
-- per-CPU or routed platform interrupt conditions;
-- software-interrupt/IPI sources in the interrupt controller;
-- CPU identification/startup facilities;
-- coherent memory;
-- remote translation-shootdown protocol;
-- `SIA32-A` atomics.
-
-These do not add baseline privileged registers.
-
-In particular, an IPI is a platform interrupt-controller source, not an `IPENDING` bit in the CPU.
+None of these require new baseline privileged registers.
 
 ---
 
-# 19. First Lighting privileged profile
+# 22. First Lighting privileged CPU contract
 
 A Cosmic-capable first Lighting CPU implements:
 
 ```text
-U / S privilege
+U/S privilege
 
-six privileged 32-bit registers:
-    STATUS
-    EPC
-    CAUSE
-    BADADDR
-    SCRATCH
-    VMCTX
+STATUS
+EPC
+CAUSE
+BADADDR
+SCRATCH
+VMCTX
 
 fixed platform TRAP_VECTOR
-single platform interrupt condition
+one CPU platform-interrupt condition
 
-SREAD / SWRITE / SSWAP
-SRET / SRETCTX
-TLBFENCE / TLBFENCE.VA / TLBFENCE.ASID
+SREAD/SWRITE/SSWAP
+SRET/SRETCTX
+TLBFENCE/TLBFENCE.VA/TLBFENCE.ASID
 WFI
+FENCE/SYNC.I
 
 SIA32-MMU
 SIA32-MEM
 ```
 
-There are no banked GPRs, CPU interrupt-controller registers, programmable trap-vector register, or separate MMU-root/ASID registers.
+There are no banked GPRs, CPU interrupt-source registers, writable TVEC, or separate VMROOT/ASID registers.
 
 ---
 
-# 20. Fast Cosmic IPC shape
-
-The intended common cross-address-space IPC path is:
+# 23. Fast Cosmic IPC shape
 
 ```text
-Sender User
+Sender U
     r1-r6 = short message
     TRAP IPC_CALL
         |
@@ -724,71 +724,102 @@ Sender User
 fixed globally mapped TRAP_VECTOR
         |
         v
-Cosmic Supervisor
+Cosmic S
     SSWAP sp,SCRATCH
     validate endpoint
-    save only required sender persistent state
+    save required persistent sender state
     load receiver persistent state
-    leave/prepare r1-r6 as message registers
+    retain/prepare r1-r6 message registers
     SSWAP sp,SCRATCH
     SRETCTX receiver_vmctx
         |
         v
-Receiver User
+Receiver U
 ```
 
-No TLB flush, trap-vector register load, interrupt-mask-register save, or page-table-root/ASID pair update is required on the normal path.
+The common path requires no TLB flush, programmable trap-vector load, CPU interrupt-bitmap save, or separate root/ASID register update.
 
 ---
 
-# 21. Conformance requirements
+# 24. Conformance requirements
 
 The Rust VM and later hardware must test at minimum:
 
-## Privilege
+## Reset/state
 
-- User privileged instruction faults.
-- Supervisor privileged instruction succeeds.
-- six-register namespace and reserved IDs behave correctly.
-- writes to `CAUSE`/`BADADDR` fault as illegal instructions.
+- deterministic six-register reset values;
+- current mode resets to S;
+- reserved STATUS bits read zero and ignore writes.
+
+## Privilege/system registers
+
+- User privileged instructions raise PRIVILEGE;
+- Supervisor privileged instructions execute;
+- reserved SYSTEM encodings raise ILLEGAL_INSTRUCTION;
+- reserved register selectors raise ILLEGAL_INSTRUCTION in S;
+- writes to CAUSE/BADADDR raise ILLEGAL_INSTRUCTION;
+- SSWAP works only with SCRATCH.
 
 ## Trap entry
 
-- every synchronous cause records correct `EPC`;
-- `TRAP` records `imm8`;
-- `BADADDR` is correct where defined;
-- previous mode/IE are recorded;
-- `IE` clears on entry;
-- PC becomes platform `TRAP_VECTOR`;
-- `VMCTX` remains unchanged.
+- each synchronous cause records exact EPC;
+- TRAP records imm8;
+- BREAK maps to BREAKPOINT;
+- BADADDR rules above are exact;
+- PP/PIE capture old state;
+- IE clears;
+- mode becomes S;
+- PC becomes TRAP_VECTOR;
+- VMCTX is unchanged;
+- trap from S records PP=S;
+- trap-entry fetch failure is treated as fatal entry failure, not recursive normal exception.
 
-## Platform interrupt
+## Priority
 
-- controller pending source with `IE=0` is retained but not taken;
-- setting `IE=1` permits delivery;
-- `CAUSE` records `PLATFORM_INTERRUPT` only;
-- actual source is obtained from controller claim state;
-- complete/retrigger behavior is platform-correct.
+- synchronous fault wins over simultaneously eligible asynchronous interrupt;
+- asynchronous interrupt occurs only between instructions.
 
 ## Return
 
-- `SRET` restores previous state using current `VMCTX`;
-- `SRETCTX` installs new `VMCTX` without TLB flush;
-- neither return form forces a target page-table walk before normal fetch.
+- SRET restores old PP/PIE state;
+- SRETCTX also installs captured VMCTX;
+- odd EPC faults before any return-state/VMCTX change;
+- valid returns do not pre-walk the target mapping.
+
+## Context serialization
+
+- SWRITE STATUS VM transition affects the next fetch after retirement;
+- SWRITE VMCTX affects the next translated fetch/access after retirement;
+- neither operation permits stale old-context instructions to retire afterward.
+
+## Platform interrupt
+
+- asserted condition with IE=0 is not consumed;
+- IE=1 permits delivery;
+- CAUSE records only PLATFORM_INTERRUPT;
+- source identification remains outside CPU state.
 
 ## MMU
 
-- 2 KiB pages;
-- 1 MiB superpages;
-- 12-bit ASIDs;
-- global mappings;
-- ASID reuse fences;
-- exact mapping/fault behavior from `SIA32-MMU`.
+- all conformance requirements from `SIA32-MMU.md`.
 
 ---
 
-# 22. Encoding status
+# 25. Implementation staging
 
-Privileged semantics are defined here. Binary encodings are tracked in [`SIA32-P-ENCODING.md`](SIA32-P-ENCODING.md).
+The recommended Rust VM sequence is:
 
-The compact system-register namespace now needs only six identifiers, leaving `0x6..0xF` reserved for future growth.
+```text
+1 structured guest exception type
+2 U/S state + six registers
+3 SYSTEM decode and register access
+4 central trap-entry machinery
+5 TRAP/BREAK/base integer exceptions
+6 SRET/SRETCTX
+7 one platform-interrupt input
+8 MMU/VMCTX translation
+9 TLBFENCE family
+10 Lighting interrupt controller/timer/platform
+```
+
+This keeps privilege/trap correctness separable from the later page walker and machine peripherals.
