@@ -124,7 +124,7 @@ Normative semantics: [`SIA32-MEM.md`](SIA32-MEM.md).
 - [x] only Store -> later Load to different address relaxation.
 - [x] full FENCE semantics.
 - [x] strongly ordered non-speculative MMIO.
-- [x] coherent Lighting DMA contract.
+- [x] coherent Lighting DMA direction.
 - [x] no baseline data-cache clean/invalidate instructions.
 - [x] SYNC.I semantics.
 - [x] local and cross-CPU instruction-publication model.
@@ -134,49 +134,105 @@ Normative semantics: [`SIA32-MEM.md`](SIA32-MEM.md).
 
 ---
 
-# 6. SIA Platform Specification
+# 6. Lighting-1 platform
 
-Platform skeleton: [`SIA-PLATFORM.md`](SIA-PLATFORM.md).
+Normative platform document: [`SIA-PLATFORM.md`](SIA-PLATFORM.md).
 
-## 6.1 Fixed vectors and memory map
+## 6.1 Fixed vectors and physical map
 
-- [ ] Freeze Lighting-1 RESET_VECTOR.
-- [ ] Freeze Lighting-1 TRAP_VECTOR.
-- [ ] Define physical-mode trap backing/stub.
-- [ ] Define Cosmic G=1 supervisor trap mapping.
-- [ ] Freeze RAM/ROM/MMIO map and memory attributes.
+Already frozen:
 
-## 6.2 Interrupt controller
+- [x] `RESET_VECTOR = 0xFFFF0000`.
+- [x] `TRAP_VECTOR = 0xFFFFF000`.
+- [x] physical-mode trap backing in the fixed 64 KiB system ROM window.
+- [x] protected Cosmic trap mapping at the same VA, supervisor-only executable `G=1`.
+- [x] 32-bit physical-address architecture.
+- [x] RAM-capable range `0x00000000..0xEFFFFFFF`.
+- [x] platform/I/O expansion `0xF0000000..0xFFDFFFFF`.
+- [x] PLIO0 aperture `0xFFE00000..0xFFEFFFFF`.
+- [x] system MMIO `0xFFF00000..0xFFFEFFFF`.
+- [x] system ROM `0xFFFF0000..0xFFFFFFFF`.
+- [x] no architectural physical aliases.
+- [x] unimplemented/reserved physical accesses raise access faults.
+- [x] first machine may implement only a 16 MiB RAM prefix while retaining full 32-bit physical addresses.
 
-- [ ] Define source namespace/ID width and maximum sources.
-- [ ] Define pending representation.
-- [ ] Define per-source enable/mask.
-- [ ] Define CLAIM/COMPLETE.
-- [ ] Decide priority and optional threshold model.
-- [ ] Define spurious claim value.
-- [ ] Define edge/level behavior.
-- [ ] Define software-interrupt source.
-- [ ] Define timer source.
-- [ ] Define PLIO Notification mapping.
-- [ ] Freeze controller MMIO layout.
-- [ ] Add Rust VM controller only after the one-line CPU interrupt contract is tested.
+Remaining memory-attribute work:
+
+- [ ] Freeze ROM cacheability.
+- [ ] Define executable-MMIO prohibition explicitly.
+- [ ] Freeze DMA-visible memory classes.
+
+## 6.2 Central interrupt controller
+
+Already frozen for Lighting-1:
+
+- [x] 4-bit / 16-value source namespace.
+- [x] source 0 NONE.
+- [x] source 1 MACHINE.
+- [x] source 2 TIMER.
+- [x] source 3 SOFTWARE.
+- [x] source 4 PLIO0.
+- [x] sources 5..15 reserved.
+- [x] fixed priority: lower nonzero ID is higher priority.
+- [x] `PENDING`, `ENABLE`, `CLAIM`, `COMPLETE`, `SOFTINT` MMIO interface.
+- [x] one active central claim.
+- [x] one aggregate PLIO0 source rather than duplicating device Notification IDs centrally.
+- [x] PLIO0 summary source is level-sensitive.
+- [x] controller base `0xFFF00000`.
+
+Remaining interrupt work:
+
+- [ ] Define exact MACHINE-source semantics.
+- [ ] Synchronize PLIO Notification claim/completion with PLIO/QDX specification.
+- [ ] Implement controller in Rust VM after the CPU one-line interrupt contract is tested.
 
 ## 6.3 Monotonic timer
 
-- [ ] Define 64-bit monotonic counter and discovery frequency.
-- [ ] Define stable 32-bit CPU read sequence.
-- [ ] Define 64-bit deadline/compare and one-shot behavior.
-- [ ] Define past-deadline, pending/rearm, wrap/reset behavior.
-- [ ] Freeze timer MMIO layout.
+Frozen placement/direction:
 
-## 6.4 Platform discovery / boot
+- [x] timer aperture base `0xFFF01000`.
+- [x] central interrupt source 2 = TIMER.
+- [x] 64-bit monotonic counter direction.
+- [x] 64-bit one-shot deadline/compare direction.
+- [x] no CPU timer register/pending bit.
 
-- [ ] Define Platform Information Block.
-- [ ] Define ROM layout/versioning.
-- [ ] Decide minimal boot console.
-- [ ] Define PLIO host and QDX boot-device profile.
-- [ ] Define firmware -> Cosmic handoff.
-- [ ] Define power/reset MMIO.
+Still required:
+
+- [ ] Choose timer frequency or discovery mechanism.
+- [ ] Define reset/start value.
+- [ ] Define stable 64-bit reads on a 32-bit CPU.
+- [ ] Define deadline programming.
+- [ ] Define already-expired deadline behavior.
+- [ ] Define acknowledgement/rearm semantics.
+- [ ] Define wraparound behavior.
+- [ ] Freeze timer MMIO register layout.
+
+## 6.4 PLIO integration
+
+Already frozen:
+
+- [x] exactly one PLIO host/segment in Lighting-1.
+- [x] `PLIO0_BASE = 0xFFE00000`, size 1 MiB.
+- [x] INTC source 4 is PLIO0 Notification summary.
+- [x] coherent protected DMA to NORMAL RAM as the platform direction.
+- [x] graphics is optional PLIO/QDX hardware rather than a base framebuffer aperture.
+
+Still required:
+
+- [ ] PLIO0 reset state and enumeration order.
+- [ ] detailed Notification claim/completion interaction.
+- [ ] protected-DMA ordering/visibility contract.
+- [ ] mandatory QDX boot-block profile.
+
+## 6.5 Discovery, ROM, and boot
+
+- [ ] Freeze Platform Information Block location/header/versioning/profile ID/RAM descriptors/features.
+- [ ] Define ROM header/version/checksum and internal organization.
+- [ ] Define physical-mode trap-stub contract in detail.
+- [ ] Decide boot diagnostics console requirements.
+- [ ] Decide VM-on versus VM-off firmware -> Cosmic handoff.
+- [ ] Freeze boot argument registers and boot-device identity.
+- [ ] Define warm/cold reset, power-off, and optional watchdog controls.
 
 ---
 
@@ -257,17 +313,17 @@ No new baseline privileged registers should be added merely for SMP.
 # Immediate order
 
 ```text
-1. implement structured exceptions in LightingSimulation
+1. implement structured guest exceptions in LightingSimulation
 2. implement U/S + six-register SIA32-P state
 3. implement SYSTEM decode + trap entry + SRET/SRETCTX
-4. add one platform interrupt input and conformance tests
+4. add one CPU platform-interrupt input and conformance tests
 5. implement MMU/VMCTX/TLB/TLBFENCE
-6. freeze SIA32-P binary encoding after executable tests
-7. freeze SIA ABI
-8. freeze Lighting RESET/TRAP vectors + physical memory map
-9. define Lighting interrupt controller and timer
-10. define Platform Information Block / boot contract
-11. define object + relocation format
+6. freeze SIA32-P binary encoding after executable conformance
+7. implement already-specified Lighting-1 physical map/vectors/controller shell
+8. finish monotonic timer semantics
+9. finish PLIO Notification/DMA integration
+10. freeze Platform Information Block and firmware -> Cosmic handoff
+11. freeze SIA ABI and object/relocation format as compiler work requires
 12. boot Cosmic
 ```
 
@@ -280,12 +336,13 @@ No new baseline privileged registers should be added merely for SMP.
 - [x] six-register privileged state model defined.
 - [x] MMU semantics defined.
 - [x] multi-register fault semantics defined.
-- [x] memory model/cache/DMA semantics defined.
+- [x] memory model/cache direction defined.
+- [x] Lighting-1 reset/trap vectors and physical map frozen.
+- [x] Lighting-1 central interrupt-controller shape frozen.
 - [ ] SIA32-P executable conformance green and binary encoding frozen.
+- [ ] MMU executable conformance green.
+- [ ] remaining Lighting timer/PLIO/discovery/boot details frozen.
 - [ ] SIA ABI frozen.
 - [ ] object/relocation format sufficient for Forge.
-- [ ] Lighting fixed vectors/memory map frozen.
-- [ ] Lighting interrupt controller/timer frozen.
-- [ ] boot/platform-discovery contract frozen.
 - [ ] Rust VM can implement all behavior without inventing unspecified rules.
 - [ ] Cosmic boots and runs protected user processes entirely against documented architecture.
