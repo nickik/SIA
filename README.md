@@ -23,6 +23,7 @@ SIA32-P semantics are now specified tightly enough for implementation. Its binar
 - [`SIA32-A.md`](SIA32-A.md) — optional **Atomic and Multiprocessing Extension** for coherent shared-memory systems.
 - [`SIA-ROM-RUNTIME.md`](SIA-ROM-RUNTIME.md) — ROM ABI stability, global ROM libraries, and shared arena/slab allocator code with independent kernel/user allocator state.
 - [`SIA-PLATFORM.md`](SIA-PLATFORM.md) — machine/platform contract: fixed reset/trap vectors, physical memory, platform-owned interrupt controller, timer, firmware, PLIO integration, discovery, and the first `Lighting-1` profile.
+- [`SIA-LIGHTING1-PLIO0.md`](SIA-LIGHTING1-PLIO0.md) — normative Lighting-1 PLIO0 host profile: dynamic IOchannels, protected DMA capability table, Notification hierarchy, INTC source 4, arbitration, and reset behavior.
 - [`TODO.md`](TODO.md) — ordered architecture/implementation checklist.
 
 ## Executable implementation
