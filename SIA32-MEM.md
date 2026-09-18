@@ -2,6 +2,13 @@
 
 ## Status
 
+## Normative memory-model declaration
+
+**SIA32 normal memory is SIA-TSO. This is an architectural requirement, not an implementation hint.** A conforming compiler backend must therefore preserve the SIA-TSO ordering rules and lower a language/IR full memory fence to the architectural `FENCE` instruction when a real full barrier is required.
+
+Device/MMIO accesses are stronger than normal memory: they are strongly ordered and non-speculative as defined below. A compiler must preserve volatile/device accesses in program order; it must not require an additional architectural `FENCE` merely to perform one ordinary strongly ordered MMIO access. Explicit language/IR fences, atomics that require full ordering, and algorithms closing the permitted Store→Load relaxation still map to the architectural `FENCE` semantics.
+
+
 - Architecture supplement: **SIA32-MEM**
 - Target base: `SIA32-I`
 - Purpose: define software-visible memory ordering, device ordering, DMA coherence, cache behavior, and instruction-stream synchronization
