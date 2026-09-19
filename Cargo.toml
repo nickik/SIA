@@ -1,0 +1,18 @@
+[package]
+name = "sia32-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical assembler, disassembler, and encoding helpers for the SIA32 architecture"
+license = "MIT"
+
+[lib]
+name = "sia32_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "siaasm"
+path = "src/bin/siaasm.rs"
+
+[[bin]]
+name = "siadis"
+path = "src/bin/siadis.rs"
