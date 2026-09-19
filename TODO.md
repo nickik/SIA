@@ -246,15 +246,16 @@ Current direction:
 r0       zero
 r1-r6    arguments / returns / fast IPC message registers
 r7-r8    caller-saved temporaries
-r9-r12   callee-saved
+r9-r11   callee-saved
+r12      ABI scratch
 r13      sp
 r14      lr / caller-saved link
-r15      callee-saved general register; optional frame pointer
+r15      callee-saved general-purpose register
 ```
 
-- [ ] Freeze arguments/returns/caller-save/callee-save.
+- [x] Freeze arguments/returns/caller-save/callee-save.
 - [ ] Freeze stack growth and 16-byte public-call alignment.
-- [ ] Freeze optional frame-pointer convention.
+- [x] No architectural frame pointer; compilers may locally designate a callee-saved GPR when required.
 - [ ] Define 64-bit values and aggregate passing.
 - [ ] Define varargs if required.
 - [ ] Decide TLS model.
