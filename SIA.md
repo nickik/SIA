@@ -368,6 +368,13 @@ rd      = load32(address)
 
 This yields approximately ±512 bytes of literal reach.
 
+Because the base depends on bits 1:0 of the architectural PC, code generators that
+resolve `LDPC.W` fixups relative to a function-local origin must preserve that
+origin's modulo-4 phase when linking. The canonical SIA toolchain therefore
+requires compiled function entry addresses to be **4-byte aligned**. Moving such
+a function from `0 mod 4` to `2 mod 4` after fixup is invalid because it changes
+the effective literal address by two bytes.
+
 ---
 
 # 13. Conditional and counted branches
