@@ -28,11 +28,14 @@ Register conventions:
 
 ```text
 r0       constant zero
-r1-r12   general-purpose
-r13      sp by ABI
-r14      lr by ABI
-r15      general-purpose; optional frame pointer by ABI
+r1-r11   general-purpose
+r12      ABI scratch
+r13      stack pointer by ABI
+r14      link register by ABI
+r15      general-purpose; callee-saved by ABI
 ```
+
+SIA does not define a dedicated architectural frame-pointer register. The ABI may permit a compiler to designate a callee-saved general-purpose register (for example `r15`) as a frame pointer for an individual function, but that is a compiler convention and does not reserve the register architecture-wide.
 
 Reads of `r0` return zero. Ordinary writes to `r0` are discarded, except that selected destination-zero encodings are intentionally assigned to unary instructions.
 
