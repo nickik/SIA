@@ -90,3 +90,14 @@ coherent multiprocessor
 ```
 
 Future extensions must not silently redefine an existing frozen-baseline encoding or semantic rule.
+
+
+## Canonical assembler and disassembler
+
+This repository contains the executable SIA32 tooling reference as the Rust crate `sia32-tools`.
+
+- `cargo run --bin siaasm -- program.sia -o program.bin` assembles canonical SIA32-I/SIA32-P syntax.
+- `cargo run --bin siadis -- program.bin --base 0x00100000` disassembles raw SIA32 little-endian halfwords with architectural PC-relative targets.
+- The library API exports `assemble`, `decode_word`, `disassemble_word`, and `disassemble_bytes`.
+
+Simulators and compiler tests should consume this crate rather than maintain private instruction spelling or decoder tables.
